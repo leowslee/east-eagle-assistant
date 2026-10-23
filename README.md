@@ -40,6 +40,21 @@ Staff can send `NEW` to start a fresh conversation. Conversations also restart a
 
 Tests: `pip install -r requirements-dev.txt && pytest`.
 
+## Quick setup (Cloud Shell)
+
+Before you start, have ready: the Anthropic API key, the WhatsApp permanent token, Phone number ID and App secret (step 6 below), and `client_secret.json` from step 4.
+
+1. In the Google Cloud console, open Cloud Shell (the `>_` icon at the top right).
+2. Run:
+   ```sh
+   git clone https://github.com/leowslee/east-eagle-assistant && cd east-eagle-assistant
+   ```
+   (GitHub asks you to sign in because the repo is private. Use a personal access token as the password.)
+3. Upload `client_secret.json` into that folder (Cloud Shell menu `⋮` > Upload).
+4. Run `./setup.sh YOUR_PROJECT_ID`. It asks for each key with hidden typing, walks you through Eileen's Google sign-in, asks for the staff list, deploys, and prints the webhook details for step 9.
+
+The script does steps 1 to 3 and 5 to 8 below. Run it again at any time; it skips what already exists. The manual steps are kept below for reference.
+
 ## Setup
 
 All Google Cloud resources go in region `asia-east2` (Hong Kong). Commands assume `gcloud` is installed and signed in.
