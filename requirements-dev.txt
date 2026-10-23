@@ -1,0 +1,3 @@
+-r requirements.txt
+google-auth-oauthlib==1.5.0
+pytest==9.1.1
