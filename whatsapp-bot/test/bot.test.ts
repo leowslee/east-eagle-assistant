@@ -9,6 +9,7 @@ import { MemoryAuditLog } from "../src/audit.js";
 import type { Config } from "../src/config.js";
 import { Drive, DriveError } from "../src/drive.js";
 import { extractText, isAddressedToBot, stripAddress } from "../src/route.js";
+import { describeTiming, dueSchedules, isDue, TaskStore, validateSchedules } from "../src/schedule.js";
 import { MemoryStore } from "../src/store.js";
 
 function tempDrive() {
@@ -38,6 +39,7 @@ function config(root: string): Config {
     model: "claude-opus-5-5",
     effort: "medium",
     conversationIdleHours: 4,
+    schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
 
@@ -207,4 +209,83 @@ test("agent: API error leaves stored history untouched", async () => {
   const reply = await a.handle(incoming("hello"));
   assert.match(reply, /couldn't reach/);
   assert.equal(store.load("group1@g.us"), undefined);
+});
+
+// 2026-11-09 is a Monday. 00:30 UTC = 08:30 HKT.
+const hk = (date: string, time: string) => new Date(`${date}T${time}:00+08:00`);
+
+test("schedule: due times, days, catch-up and once a day", () => {
+  const s = [{ name: "Morning", group: "Ops", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "x" }];
+  assert.equal(dueSchedules(s, hk("2026-11-09", "08:29"), {}).length, 0);
+  assert.equal(dueSchedules(s, hk("2026-11-09", "08:30"), {}).length, 1);
+  assert.equal(dueSchedules(s, hk("2026-11-09", "10:00"), {}).length, 1); // PC was asleep, catches up
+  assert.equal(dueSchedules(s, hk("2026-11-09", "10:31"), {}).length, 0); // too late
+  assert.equal(dueSchedules(s, hk("2026-11-09", "09:00"), { "config:Morning": "2026-11-09" }).length, 0);
+  assert.equal(dueSchedules(s, hk("2026-11-08", "08:30"), {}).length, 0); // Sunday
+  assert.ok(isDue({ time: "23:59", date: "2026-11-09" }, hk("2026-11-09", "23:59")));
+  assert.ok(!isDue({ time: "09:00", date: "2026-11-10" }, hk("2026-11-09", "09:00")));
+  assert.equal(describeTiming({ time: "08:30", days: ["fri", "mon", "tue", "wed", "thu"] }), "every weekday at 08:30");
+  assert.throws(() => validateSchedules([{ name: "a", group: "g", time: "8:30", prompt: "x" }]), /HH:MM/);
+  assert.throws(() => validateSchedules([{ name: "a", group: "g", time: "08:30", days: ["monday"], prompt: "x" }]), /unknown day/);
+});
+
+test("agent: members can schedule, list and cancel tasks", async () => {
+  const { root } = tempDrive();
+  const tasks = new TaskStore();
+  const { client, requests } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "schedule_task", input: { name: "Positions", instruction: "Summarise X:\\Trading positions", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"] } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Scheduled." }], stop_reason: "end_turn" },
+  ]);
+  const { messenger } = fakeMessenger();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client, tasks);
+  await a.handle(incoming("every weekday 8:30 summarise positions"));
+  assert.equal(tasks.forChat("group1@g.us").length, 1);
+  const task = tasks.tasks[0];
+  assert.match(requests[1].at(-1).content[0].content, /every weekday at 08:30/);
+  assert.equal(task.createdByPhone, "85290000002");
+
+  // Someone else can't cancel it; the approver can.
+  const { client: c2, requests: r2 } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t2", name: "cancel_scheduled_task", input: { code: task.id } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "No." }], stop_reason: "end_turn" },
+    { content: [{ type: "tool_use", id: "t3", name: "list_scheduled_tasks", input: {} }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "List." }], stop_reason: "end_turn" },
+    { content: [{ type: "tool_use", id: "t4", name: "cancel_scheduled_task", input: { code: task.id } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Cancelled." }], stop_reason: "end_turn" },
+  ]);
+  const b = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, c2, tasks);
+  await b.handle(incoming("cancel it", "Bob", "85290000009"));
+  assert.equal(r2[1].at(-1).content[0].is_error, true);
+  await b.handle(incoming("what's scheduled?", "Bob", "85290000009"));
+  const listed = JSON.parse(r2[3].at(-1).content[0].content);
+  assert.equal(listed.tasks[0].code, task.id);
+  assert.equal(listed.fromConfig[0].name, "Morning");
+  await b.handle(incoming("cancel it", "Leo", "85290000001"));
+  assert.equal(tasks.tasks.length, 0);
+});
+
+test("agent: a scheduled run can't create more tasks", async () => {
+  const { root } = tempDrive();
+  const tasks = new TaskStore();
+  const { client, requests } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "schedule_task", input: { name: "Loop", instruction: "x", time: "09:00" } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Report." }], stop_reason: "end_turn" },
+  ]);
+  const { messenger } = fakeMessenger();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client, tasks);
+  await a.handle({ ...incoming("Summarise positions"), scheduled: { id: "T1234", name: "Morning", createdBy: "Amy" } });
+  assert.match(requests[0].at(-1).content, /Scheduled task "Morning"/);
+  assert.equal(requests[1].at(-1).content[0].is_error, true);
+  assert.equal(tasks.tasks.length, 0);
+});
+
+test("schedule: task store saves to disk and survives a restart", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tasks-")), "schedules.json");
+  const s = new TaskStore(file);
+  const t = s.add({ name: "Once", chatId: "c", chatName: "C", time: "09:00", date: "2026-11-09", prompt: "x", createdBy: "Amy", createdByPhone: "1" });
+  assert.equal(s.due(hk("2026-11-09", "09:01"))[0].id, t.id);
+  s.markRun(t.id, "2026-11-09");
+  const again = new TaskStore(file);
+  assert.equal(again.due(hk("2026-11-09", "09:02")).length, 0);
+  assert.equal(again.expired(hk("2026-11-10", "09:00")).length, 1);
 });

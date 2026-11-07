@@ -5,6 +5,7 @@ import type { AuditLog } from "./audit.js";
 import { hkTime } from "./audit.js";
 import type { Config } from "./config.js";
 import { Drive, DriveError } from "./drive.js";
+import { describeTiming, MAX_TASKS_PER_CHAT, timingProblem, type TaskStore } from "./schedule.js";
 import type { Conversation, Store } from "./store.js";
 
 type MessageParam = Anthropic.Beta.BetaMessageParam;
@@ -25,6 +26,8 @@ export interface Incoming {
   senderPhone: string;
   text: string;
   quotedText?: string;
+  // Set when a scheduled task is running rather than a person asking.
+  scheduled?: { id: string; name: string; createdBy: string };
 }
 
 export interface Messenger {
@@ -46,6 +49,7 @@ export interface PendingChange {
 
 const APPROVAL_TTL_MS = 24 * 3600_000;
 const CHANGE_TOOLS = new Set(["create_folder", "write_text_file", "copy_file", "move_file"]);
+const TASK_TOOLS = new Set(["schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"]);
 
 const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
@@ -138,6 +142,42 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "schedule_task",
+    description:
+      "Set up a task that you will carry out at a set time in this chat, repeating on chosen days or once on a date, and post the result here. The instruction is run later exactly as written, so make it complete and self-contained (which files or folders, what to check, what to report). Times are Hong Kong time.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Short name, e.g. 'Morning positions'." },
+        instruction: { type: "string", description: "What to do each time, written as a full request to yourself." },
+        time: { type: "string", description: "HH:MM, 24-hour Hong Kong time, e.g. 08:30" },
+        days: {
+          type: "array",
+          items: { type: "string", enum: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] },
+          description: "Days to repeat on. Leave out for every day. Weekdays: mon-fri.",
+        },
+        date: { type: "string", description: "YYYY-MM-DD for a one-off task. Don't combine with days." },
+      },
+      required: ["name", "instruction", "time"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_scheduled_tasks",
+    description: "List the scheduled tasks set up for this chat, with their codes.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "cancel_scheduled_task",
+    description: "Cancel a scheduled task in this chat by its code (e.g. T4821). Only the person who set it up or an approver can cancel it.",
+    input_schema: {
+      type: "object",
+      properties: { code: { type: "string" } },
+      required: ["code"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function systemPrompt(config: Config, drive: Drive): string {
@@ -153,6 +193,12 @@ How to work:
 - When you use a file, name it and give its folder so people can open it themselves. Quote figures exactly as they appear in the file, and say which file and date they come from.
 - Send a file with send_file only when someone asks for the file. Everyone in the chat receives it.
 - Times are Hong Kong time unless someone says otherwise.
+
+Scheduled tasks:
+- People can ask you to do something regularly or later ("every weekday at 8:30, summarise the positions file"). Set it up with schedule_task, then confirm the name, code, timing and what you'll do. If the timing or the task is unclear, ask first.
+- Write the instruction so it works on its own later, without this conversation: name the folders or files, what to look at and what to report.
+- A message that starts with "Scheduled task" is you running one of these tasks. Nobody is waiting on the other end: do the work and post the result for the chat, starting with the task's name. If something is missing (e.g. today's file isn't there yet), say so plainly.
+- Scheduled tasks follow the same limits: drive changes still need an approver's YES each time.
 
 Limits:
 - Reading is always allowed. Creating folders, saving text files, copying and moving files need an approver's YES: when you call those tools, the approver gets a private message and the change happens only if they approve. Tell the person it is waiting for approval; never say it is done. You can't delete files or edit Word, Excel or PDF files.
@@ -190,6 +236,7 @@ export class Assistant {
     private audit: AuditLog,
     private messenger: Messenger,
     private client: Pick<Anthropic, "beta"> = new Anthropic(),
+    private tasks?: TaskStore,
   ) {
     this.system = systemPrompt(config, drive);
   }
@@ -284,7 +331,10 @@ export class Assistant {
 
     const conversation = this.loadOrStart(msg.chatId);
     const base = conversation.messages.length;
-    let content = `[${hkTime().slice(0, 16).replace("T", " ")} HKT] ${msg.senderName}: ${msg.text}`;
+    const stamp = `[${hkTime().slice(0, 16).replace("T", " ")} HKT]`;
+    let content = msg.scheduled
+      ? `${stamp} Scheduled task "${msg.scheduled.name}" (${msg.scheduled.id}, set up by ${msg.scheduled.createdBy}). Do this now and post the result:\n${msg.text}`
+      : `${stamp} ${msg.senderName}: ${msg.text}`;
     if (msg.quotedText) content += `\n(Replying to: "${msg.quotedText.slice(0, 2000)}")`;
     conversation.messages.push({ role: "user", content });
 
@@ -357,6 +407,7 @@ export class Assistant {
   ): Promise<{ content: string; is_error?: boolean }> {
     const input = use.input as Record<string, any>;
     if (CHANGE_TOOLS.has(use.name)) return this.requestApproval(use.name, input, msg, who);
+    if (TASK_TOOLS.has(use.name)) return this.taskTool(use.name, input, msg, who);
     try {
       let output: unknown;
       switch (use.name) {
@@ -390,6 +441,54 @@ export class Assistant {
       const message = err instanceof DriveError ? err.message : `Tool error: ${String(err)}`;
       this.audit.record("tool_error", { ...who, tool: use.name, input, error: message });
       return { content: message, is_error: true };
+    }
+  }
+
+  private taskTool(name: string, input: Record<string, any>, msg: Incoming, who: Record<string, string>): { content: string; is_error?: boolean } {
+    if (!this.tasks) return { content: "Scheduled tasks aren't available.", is_error: true };
+    if (msg.scheduled) return { content: "A scheduled task can't set up or change scheduled tasks.", is_error: true };
+    const fromConfig = this.config.schedules
+      .filter((s) => msg.isGroup && s.group.toLowerCase() === msg.chatName.toLowerCase())
+      .map((s) => ({ name: s.name, when: describeTiming(s), instruction: s.prompt, note: "set in config.json; only Leo can change it" }));
+    switch (name) {
+      case "schedule_task": {
+        const timing = { time: String(input.time ?? ""), days: input.days?.length ? input.days.map(String) : undefined, date: input.date ? String(input.date) : undefined };
+        const problem = timingProblem(timing);
+        if (problem) return { content: `Not scheduled: ${problem}.`, is_error: true };
+        if (timing.date && timing.date < hkTime().slice(0, 10)) return { content: "Not scheduled: that date has passed.", is_error: true };
+        if (!String(input.instruction ?? "").trim()) return { content: "Not scheduled: the instruction is empty.", is_error: true };
+        if (this.tasks.forChat(msg.chatId).length >= MAX_TASKS_PER_CHAT)
+          return { content: `Not scheduled: this chat already has ${MAX_TASKS_PER_CHAT} tasks. Cancel one first.`, is_error: true };
+        const task = this.tasks.add({
+          name: String(input.name ?? "Task").slice(0, 80),
+          chatId: msg.chatId,
+          chatName: msg.chatName,
+          ...timing,
+          prompt: String(input.instruction),
+          createdBy: msg.senderName,
+          createdByPhone: msg.senderPhone,
+        });
+        this.audit.record("task_scheduled", { ...who, task });
+        return { content: JSON.stringify({ scheduled: task.id, name: task.name, when: describeTiming(task) }) };
+      }
+      case "list_scheduled_tasks": {
+        const tasks = this.tasks.forChat(msg.chatId).map((t) => ({
+          code: t.id, name: t.name, when: describeTiming(t), instruction: t.prompt, setUpBy: t.createdBy,
+        }));
+        return { content: JSON.stringify({ tasks, fromConfig }) };
+      }
+      case "cancel_scheduled_task": {
+        const code = String(input.code ?? "");
+        const task = this.tasks.forChat(msg.chatId).find((t) => t.id.toLowerCase() === code.trim().toLowerCase());
+        if (!task) return { content: `No task ${code} in this chat.`, is_error: true };
+        const allowed = (msg.senderPhone && msg.senderPhone === task.createdByPhone) || this.config.approvers.includes(msg.senderPhone);
+        if (!allowed) return { content: `Only ${task.createdBy} (who set it up) or an approver can cancel ${task.id}.`, is_error: true };
+        this.tasks.remove(task.id);
+        this.audit.record("task_cancelled", { ...who, task });
+        return { content: `Cancelled ${task.id} (${task.name}).` };
+      }
+      default:
+        return { content: `Unknown tool ${name}`, is_error: true };
     }
   }
 

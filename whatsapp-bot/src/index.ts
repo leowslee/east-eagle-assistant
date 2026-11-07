@@ -17,6 +17,7 @@ import { Assistant } from "./agent.js";
 import { FileAuditLog } from "./audit.js";
 import { loadConfig } from "./config.js";
 import { Drive } from "./drive.js";
+import { configKey, dueSchedules, hkParts, TaskStore } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { FileStore } from "./store.js";
 
@@ -42,6 +43,8 @@ const MIME: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+const tasks = new TaskStore(path.join(config.dataDir, "schedules.json"));
+
 const assistant = new Assistant(config, drive, new FileStore(path.join(config.dataDir, "conversations")), audit, {
   async sendText(chatId, text) {
     await sock.sendMessage(chatId, { text });
@@ -50,7 +53,7 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const mimetype = MIME[path.extname(fileName).toLowerCase()] ?? "application/octet-stream";
     await sock.sendMessage(chatId, { document: { url: filePath }, fileName, mimetype });
   },
-});
+}, undefined, tasks);
 
 async function groupName(jid: string): Promise<string> {
   const cached = groupNames.get(jid);
@@ -127,6 +130,70 @@ async function onMessage(msg: WAMessage): Promise<void> {
   }
 }
 
+// Scheduled tasks: checked every 30 seconds while connected.
+let schedulerStarted = false;
+const runningTasks = new Set<string>();
+
+async function groupIdsByName(): Promise<Map<string, string>> {
+  const groups = await sock.groupFetchAllParticipating();
+  const byName = new Map<string, string>();
+  for (const [id, meta] of Object.entries(groups)) byName.set(meta.subject.toLowerCase(), id);
+  return byName;
+}
+
+async function runTask(key: string, chatId: string, chatName: string, task: { name: string; prompt: string; createdBy: string; id: string }) {
+  if (runningTasks.has(key)) return;
+  runningTasks.add(key);
+  // Marked before running, so a crash part-way can't post the same report twice.
+  tasks.markRun(key, hkParts(new Date()).date);
+  audit.record("task_run", { key, chat: chatName, chatId, name: task.name });
+  try {
+    const reply = await assistant.handle({
+      chatId, chatName, isGroup: Boolean(isJidGroup(chatId)), senderName: "Scheduled task", senderPhone: "", text: task.prompt,
+      scheduled: { id: task.id, name: task.name, createdBy: task.createdBy },
+    });
+    await sock.sendMessage(chatId, { text: reply });
+  } finally {
+    runningTasks.delete(key);
+  }
+}
+
+async function checkSchedules(): Promise<void> {
+  const now = new Date();
+  for (const t of tasks.expired(now)) {
+    tasks.remove(t.id);
+    audit.record("task_missed", { chat: t.chatName, chatId: t.chatId, task: t });
+  }
+  for (const t of tasks.due(now)) {
+    runTask(t.id, t.chatId, t.chatName, t)
+      .then(() => { if (t.date) tasks.remove(t.id); })
+      .catch((err) => audit.record("error", { where: "task", task: t.id, error: String(err) }));
+  }
+  const due = dueSchedules(config.schedules, now, tasks.lastRuns);
+  if (!due.length) return;
+  const groups = await groupIdsByName();
+  for (const s of due) {
+    const chatId = groups.get(s.group.toLowerCase());
+    if (!chatId) {
+      tasks.markRun(configKey(s), hkParts(now).date);
+      audit.record("task_skipped", { name: s.name, reason: "group not found", group: s.group });
+      console.warn(`Scheduled report "${s.name}": I'm not in a group called "${s.group}".`);
+      continue;
+    }
+    runTask(configKey(s), chatId, s.group, { id: "config", name: s.name, prompt: s.prompt, createdBy: "config.json" })
+      .catch((err) => audit.record("error", { where: "schedule", name: s.name, error: String(err) }));
+  }
+}
+
+function startScheduler(): void {
+  if (schedulerStarted) return;
+  schedulerStarted = true;
+  setInterval(() => {
+    if (!sock?.user) return;
+    checkSchedules().catch((err) => audit.record("error", { where: "scheduler", error: String(err) }));
+  }, 30_000);
+}
+
 async function connect(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(config.dataDir, "auth"));
   const { version } = await fetchLatestBaileysVersion();
@@ -142,6 +209,7 @@ async function connect(): Promise<void> {
       retryDelayMs = 5000;
       console.log(`Connected as ${sock.user?.id}. Listening for messages.`);
       audit.record("connected", { user: sock.user?.id });
+      startScheduler();
     }
     if (connection === "close") {
       const code = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;

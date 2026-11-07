@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { validateSchedules, type Schedule } from "./schedule.js";
 
 export interface DriveRoot {
   name: string; // what staff and Claude call it, e.g. "X drive"
@@ -27,6 +28,8 @@ export interface Config {
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   conversationIdleHours: number;
+  // Reports the assistant posts in a group at set times (Hong Kong time).
+  schedules: Schedule[];
 }
 
 const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
@@ -40,6 +43,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   model: "claude-opus-5-5",
   effort: "medium",
   conversationIdleHours: 4,
+  schedules: [],
 };
 
 export const digitsOnly = (s: string) => s.replace(/\D/g, "");
@@ -52,6 +56,7 @@ export function loadConfig(file = "config.json"): Config {
   config.triggerWords = config.triggerWords.map((w) => w.toLowerCase().replace(/^@/, ""));
   config.dataDir = path.resolve(config.dataDir);
   config.logDir = path.resolve(config.logDir);
+  validateSchedules(config.schedules);
   if (config.driveRoots.length === 0) throw new Error("config.json: driveRoots is empty");
   return config;
 }

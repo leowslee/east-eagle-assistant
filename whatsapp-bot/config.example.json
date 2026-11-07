@@ -12,5 +12,14 @@
   "logDir": "logs",
   "model": "claude-opus-5-5",
   "effort": "medium",
-  "conversationIdleHours": 4
+  "conversationIdleHours": 4,
+  "schedules": [
+    {
+      "name": "Morning report",
+      "group": "CDF Trading",
+      "time": "08:30",
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "prompt": "Find the latest daily position file in X:\\Trading and summarise the positions and any big changes from the day before."
+    }
+  ]
 }

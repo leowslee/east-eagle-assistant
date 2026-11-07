@@ -14,6 +14,8 @@ The bot connects through the WhatsApp Web protocol, which WhatsApp does not offe
 - **Reading the drive is always allowed.** It searches file names and folders, lists folders, and reads PDF, Word (.docx), Excel (.xlsx) and text files.
 - **Changes need approval.** Creating folders, saving text files, and copying or moving files are never done directly. The approver (Leo) gets a private WhatsApp message describing the exact change and a 4-digit code, and the change happens only after the reply `YES 1234`. `NO 1234` rejects it. The bot can't delete files or edit Word, Excel or PDF files.
 - **Audit log.** Every message the bot handles, every reply, file read, file sent and change is written to `logs\YYYY-MM-DD.jsonl`, one line per event.
+- **Scheduled tasks.** Anyone on the staff list can ask Eileen to do something at set times, in a group or a private chat: "Eileen, every weekday at 8:30 summarise the latest positions file in X:\Trading" or "Eileen, tomorrow at 5pm remind us to check the NAV pack". She confirms with a code such as `T4821` and posts the result in that chat at the time (Hong Kong time). "Eileen, what's scheduled?" lists them. "Eileen, cancel T4821" removes one; only the person who set it up or an approver can cancel. A scheduled task follows the same rules: drive changes still need the approver's YES. If the PC was asleep at the time, the task still runs if the bot is back within 2 hours.
+- **Fixed reports in config.json.** You can also list reports under `schedules` in config.json (see `config.example.json`): `group` is the group name exactly as in WhatsApp, `time` is `HH:MM` Hong Kong time, and `days` is optional (leave it out for every day). These can only be changed by editing the file and restarting.
 - Send `new` to start a fresh conversation. Conversations also restart after 4 hours of quiet.
 
 ## Install on the office PC
@@ -65,5 +67,6 @@ Leave the window open. Closing it stops the bot.
 | `src/route.ts` | Mention, reply and name detection; staff and group checks |
 | `src/agent.ts` | Claude conversation, tools and the approval flow |
 | `src/drive.ts` | Search, list, read, and the approved change operations, limited to `driveRoots` |
+| `src/schedule.ts` | Scheduled tasks and reports |
 | `src/audit.ts` | Daily audit log files |
 | `test/` | Tests (`npm test`) |
