@@ -39,6 +39,7 @@ function config(root: string): Config {
     model: "claude-opus-5-5",
     effort: "medium",
     conversationIdleHours: 4,
+    webSearch: true,
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -305,4 +306,16 @@ test("agent: a rejected saved conversation restarts and retries", async () => {
   assert.equal(await a.handle(incoming("hi")), "Hi!");
   assert.equal(calls, 2);
   assert.equal(store.load("group1@g.us")!.messages.length, 2);
+});
+
+test("agent: a paused web search turn is continued", async () => {
+  const { root } = tempDrive();
+  const { client, requests } = fakeClaude([
+    { content: [{ type: "server_tool_use", id: "s1", name: "web_search", input: { query: "HSI close" } }], stop_reason: "pause_turn" },
+    { content: [{ type: "text", text: "The HSI closed at 26,000 (source: HKEX)." }], stop_reason: "end_turn" },
+  ]);
+  const { messenger } = fakeMessenger();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client);
+  assert.match(await a.handle(incoming("where did the HSI close?")), /26,000/);
+  assert.equal(requests[1].at(-1).role, "assistant");
 });

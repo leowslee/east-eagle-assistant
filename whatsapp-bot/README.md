@@ -11,6 +11,7 @@ The bot connects through the WhatsApp Web protocol, which WhatsApp does not offe
 - **In groups** it only reacts when someone @mentions it, replies to one of its messages, or starts a message with its name ("Eileen, where's the October NAV pack?"). Other group messages are not read, stored or sent anywhere.
 - **In private chats** it answers every message from staff on the list.
 - **Only people on the staff list get answers.** Anyone else is ignored and logged.
+- **The internet.** She can search the web and read public web pages (news, announcements, prices). Set `"webSearch": false` in config.json to turn this off. Searches go through Anthropic's web search, so she is told never to put client or position details into a search.
 - **Reading the drive is always allowed.** It searches file names and folders, lists folders, and reads PDF, Word (.docx), Excel (.xlsx) and text files.
 - **Changes need approval.** Creating folders, saving text files, and copying or moving files are never done directly. The approver (Leo) gets a private WhatsApp message describing the exact change and a 4-digit code, and the change happens only after the reply `YES 1234`. `NO 1234` rejects it. The bot can't delete files or edit Word, Excel or PDF files.
 - **Audit log.** Every message the bot handles, every reply, file read, file sent and change is written to `logs\YYYY-MM-DD.jsonl`, one line per event.
