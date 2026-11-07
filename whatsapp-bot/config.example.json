@@ -13,6 +13,7 @@
   "model": "claude-opus-5-5",
   "effort": "medium",
   "conversationIdleHours": 4,
+  "webSearch": true,
   "schedules": [
     {
       "name": "Morning report",

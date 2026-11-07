@@ -28,6 +28,8 @@ export interface Config {
   model: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   conversationIdleHours: number;
+  // Let the assistant search the internet and read public web pages.
+  webSearch: boolean;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -43,6 +45,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   model: "claude-opus-5-5",
   effort: "medium",
   conversationIdleHours: 4,
+  webSearch: true,
   schedules: [],
 };
 
