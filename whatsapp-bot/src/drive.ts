@@ -183,6 +183,12 @@ export class Drive {
     return full;
   }
 
+  /** Whether a path (which may not exist yet) is inside a folder, comparing resolved paths. */
+  isWithin(folder: string, p: string): boolean {
+    const target = path.resolve(path.isAbsolute(p.trim()) ? p.trim() : path.join(this.roots[0].path, p.trim()));
+    return within([path.resolve(folder)], target) && this.inside(target);
+  }
+
   async createFolder(folder: string): Promise<string> {
     const full = await this.resolveForWrite(folder);
     await fs.mkdir(full);
@@ -210,6 +216,77 @@ export class Drive {
     if (await exists(dest)) throw new DriveError(`Something already exists at ${dest}`);
     await fs.rename(src, dest);
     return dest;
+  }
+
+  /**
+   * Adds one row to a records file (.xlsx or .csv), creating the file with a header row if needed.
+   * Columns are matched by header name; new column names are added to the header.
+   */
+  async addRecord(file: string, values: Record<string, string | number>): Promise<string> {
+    const full = await this.resolveForWrite(file);
+    const ext = path.extname(full).toLowerCase();
+    if (ext !== ".xlsx" && ext !== ".csv") throw new DriveError("Records can only be added to .xlsx or .csv files.");
+    const keys = Object.keys(values);
+    if (!keys.length) throw new DriveError("The record is empty.");
+    const isNew = !(await exists(full));
+    if (ext === ".csv") {
+      let header: string[] = keys;
+      if (!isNew) {
+        const text = await fs.readFile(full, "utf8");
+        header = parseCsvLine(text.split(/\r?\n/)[0] ?? "");
+        const missing = keys.filter((k) => !header.some((h) => h.toLowerCase() === k.toLowerCase()));
+        if (missing.length) throw new DriveError(`${path.basename(full)} has no column ${missing.map((m) => `"${m}"`).join(", ")}. Its columns are: ${header.join(", ")}.`);
+      }
+      const row = header.map((h) => csvCell(String(valueFor(values, h) ?? ""))).join(",");
+      const prefix = isNew ? header.map(csvCell).join(",") + "\r\n" : (await endsWithNewline(full)) ? "" : "\r\n";
+      await fs.appendFile(full, prefix + row + "\r\n", "utf8");
+      return full;
+    }
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    let sheet;
+    if (isNew) {
+      sheet = workbook.addWorksheet("Records");
+      sheet.addRow(keys);
+      sheet.getRow(1).font = { bold: true };
+    } else {
+      await workbook.xlsx.readFile(full);
+      sheet = workbook.worksheets[0];
+    }
+    const header = (sheet.getRow(1).values as unknown[]).slice(1).map((v) => String(v ?? ""));
+    for (const k of keys) {
+      if (!header.some((h) => h.toLowerCase() === k.toLowerCase())) {
+        header.push(k);
+        sheet.getRow(1).getCell(header.length).value = k;
+      }
+    }
+    sheet.addRow(header.map((h) => valueFor(values, h) ?? null));
+    const tmp = full + ".tmp.xlsx";
+    await workbook.xlsx.writeFile(tmp);
+    await fs.rename(tmp, full);
+    return full;
+  }
+
+  /**
+   * Fills in a Word form: copies the template to a new file and replaces text in it.
+   * A paragraph that contains a replacement keeps its first run's formatting.
+   */
+  async fillWordTemplate(template: string, output: string, replacements: { find: string; replace: string }[]): Promise<{ path: string; missing: string[] }> {
+    const src = await this.resolve(template);
+    const dest = await this.resolveForWrite(output);
+    if (path.extname(src).toLowerCase() !== ".docx" || path.extname(dest).toLowerCase() !== ".docx")
+      throw new DriveError("Only Word .docx forms can be filled in.");
+    if (await exists(dest)) throw new DriveError(`Something already exists at ${dest}`);
+    const JSZip = (await import("jszip")).default;
+    const zip = await JSZip.loadAsync(await fs.readFile(src));
+    const found = new Set<number>();
+    const parts = Object.keys(zip.files).filter((n) => /^word\/(document|header\d*|footer\d*)\.xml$/.test(n));
+    for (const name of parts) {
+      const xml = await zip.file(name)!.async("string");
+      zip.file(name, fillParagraphs(xml, replacements, found));
+    }
+    await fs.writeFile(dest, await zip.generateAsync({ type: "nodebuffer" }), { flag: "wx" });
+    return { path: dest, missing: replacements.filter((_r, i) => !found.has(i)).map((r) => r.find) };
   }
 
   /** For sending a file into the chat. */
@@ -280,4 +357,66 @@ export async function extractText(file: string, data: Buffer): Promise<string> {
 
 function csvCell(s: string): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function valueFor(values: Record<string, string | number>, header: string): string | number | undefined {
+  const key = Object.keys(values).find((k) => k.toLowerCase() === header.toLowerCase());
+  return key === undefined ? undefined : values[key];
+}
+
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quoted) {
+      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cur += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { out.push(cur); cur = ""; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out.map((h) => h.replace(/^\uFEFF/, "").trim());
+}
+
+async function endsWithNewline(file: string): Promise<boolean> {
+  const fh = await fs.open(file, "r");
+  try {
+    const { size } = await fh.stat();
+    if (size === 0) return true;
+    const buf = Buffer.alloc(1);
+    await fh.read(buf, 0, 1, size - 1);
+    return buf[0] === 0x0a;
+  } finally {
+    await fh.close();
+  }
+}
+
+const xmlUnescape = (s: string) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+const xmlEscape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Replaces text inside Word paragraphs, even when Word has split the text across several runs. */
+export function fillParagraphs(xml: string, replacements: { find: string; replace: string }[], found: Set<number>): string {
+  return xml.replace(/<w:p[ >][\s\S]*?<\/w:p>/g, (para) => {
+    const texts = [...para.matchAll(/<w:t(?: [^>]*)?>([\s\S]*?)<\/w:t>/g)];
+    if (!texts.length) return para;
+    const original = texts.map((m) => xmlUnescape(m[1])).join("");
+    let text = original;
+    replacements.forEach((r, i) => {
+      if (r.find && text.includes(r.find)) {
+        text = text.split(r.find).join(r.replace);
+        found.add(i);
+      }
+    });
+    if (text === original) return para;
+    let first = true;
+    return para.replace(/<w:t(?: [^>]*)?>[\s\S]*?<\/w:t>/g, () => {
+      if (!first) return "<w:t></w:t>";
+      first = false;
+      return `<w:t xml:space="preserve">${xmlEscape(text)}</w:t>`;
+    });
+  });
 }

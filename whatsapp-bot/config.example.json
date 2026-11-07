@@ -14,6 +14,9 @@
   "effort": "medium",
   "conversationIdleHours": 4,
   "webSearch": true,
+  "emailFrom": "eileen.gu@easteagle-am.com",
+  "recordsFolder": "X:\\Trading\\Admin Records",
+  "recordsNeedApproval": true,
   "schedules": [
     {
       "name": "Morning report",

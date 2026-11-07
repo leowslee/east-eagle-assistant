@@ -19,6 +19,7 @@ import { loadConfig } from "./config.js";
 import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, TaskStore } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
+import { SmtpMailer } from "./email.js";
 import { FileStore } from "./store.js";
 
 const config = loadConfig(process.argv[2] ?? "config.json");
@@ -43,6 +44,16 @@ const MIME: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+function mailer(): SmtpMailer | undefined {
+  const pass = process.env.EMAIL_APP_PASSWORD;
+  if (!config.emailFrom) return undefined;
+  if (!pass) {
+    console.warn(`Email is off: add EMAIL_APP_PASSWORD to .env to let ${config.assistantName} send from ${config.emailFrom}.`);
+    return undefined;
+  }
+  return new SmtpMailer(config.emailFrom, pass, config.assistantName);
+}
+
 const tasks = new TaskStore(path.join(config.dataDir, "schedules.json"));
 
 const assistant = new Assistant(config, drive, new FileStore(path.join(config.dataDir, "conversations")), audit, {
@@ -53,7 +64,7 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const mimetype = MIME[path.extname(fileName).toLowerCase()] ?? "application/octet-stream";
     await sock.sendMessage(chatId, { document: { url: filePath }, fileName, mimetype });
   },
-}, undefined, tasks);
+}, undefined, tasks, mailer());
 
 async function groupName(jid: string): Promise<string> {
   const cached = groupNames.get(jid);
