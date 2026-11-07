@@ -23,7 +23,8 @@ import { FileStore } from "./store.js";
 const config = loadConfig(process.argv[2] ?? "config.json");
 const audit = new FileAuditLog(config.logDir);
 const drive = new Drive(config.driveRoots);
-const logger = pino({ level: "warn" });
+// Baileys logs routine sync warnings (for example missing app-state keys after linking); show only errors.
+const logger = pino({ level: "error" });
 
 let sock: WASocket;
 let retryDelayMs = 5000;
