@@ -363,8 +363,9 @@ export class Assistant {
     } catch (err) {
       this.audit.record("error", { ...who, where: "claude", error: String(err) });
       console.error(`AI service error in "${msg.chatName}": ${String(err)}`);
-      // A conversation that has grown past the model's limit: start fresh and try once more.
-      if (!retried && base > 0 && /too long|too many tokens|context|maximum/i.test(String(err))) {
+      // The saved conversation was rejected (grown past the model's limit, or saved before the bot was
+      // updated, which invalidates its thinking blocks): start fresh and try once more.
+      if (!retried && base > 0 && (err as { status?: number })?.status === 400) {
         this.store.remove(msg.chatId);
         return this.handleNow(msg, true);
       }

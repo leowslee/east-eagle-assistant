@@ -290,14 +290,14 @@ test("schedule: task store saves to disk and survives a restart", () => {
   assert.equal(again.expired(hk("2026-11-10", "09:00")).length, 1);
 });
 
-test("agent: a conversation that is too long restarts and retries", async () => {
+test("agent: a rejected saved conversation restarts and retries", async () => {
   const { root } = tempDrive();
   const store = new MemoryStore();
   store.save("group1@g.us", { messages: [{ role: "user", content: "old" }, { role: "assistant", content: [{ type: "text", text: "old reply" }] }], updated: Date.now() });
   let calls = 0;
   const client: any = { beta: { messages: { create: async (p: any) => {
     calls++;
-    if (p.messages.length > 1) throw new Error("400 prompt is too long: 250000 tokens > 200000 maximum");
+    if (p.messages.length > 1) throw Object.assign(new Error("400 Invalid `signature` in `thinking` block"), { status: 400 });
     return { content: [{ type: "text", text: "Hi!" }], stop_reason: "end_turn", stop_details: null };
   } } } };
   const { messenger } = fakeMessenger();
