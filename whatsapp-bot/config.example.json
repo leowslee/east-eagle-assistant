@@ -1,0 +1,16 @@
+{
+  "assistantName": "Eileen",
+  "triggerWords": ["eileen"],
+  "driveRoots": [{ "name": "X drive", "path": "X:\\" }],
+  "staff": [
+    { "name": "Leo", "phone": "852 9123 4567" }
+  ],
+  "approvers": ["852 9123 4567"],
+  "allowedGroups": [],
+  "answerAnyGroupMember": false,
+  "dataDir": "data",
+  "logDir": "logs",
+  "model": "claude-opus-5-5",
+  "effort": "medium",
+  "conversationIdleHours": 4
+}

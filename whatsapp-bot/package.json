@@ -1,0 +1,28 @@
+{
+  "name": "east-eagle-whatsapp-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI assistant that joins East Eagle WhatsApp groups as a linked device and reads the company network drive.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "tsx --env-file-if-exists=.env src/index.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "baileys": "7.0.0-rc14",
+    "exceljs": "4.4.0",
+    "mammoth": "1.13.0",
+    "pdf-parse": "2.4.5",
+    "pino": "10.4.0",
+    "qrcode-terminal": "0.12.0",
+    "tsx": "4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/qrcode-terminal": "0.12.2",
+    "typescript": "5.9.3"
+  }
+}
