@@ -12,6 +12,9 @@ The bot connects through the WhatsApp Web protocol, which WhatsApp does not offe
 - **In private chats** it answers every message from staff on the list.
 - **Only people on the staff list get answers.** Anyone else is ignored and logged.
 - **The internet.** She can search the web and read public web pages (news, announcements, prices). Set `"webSearch": false` in config.json to turn this off. Searches go through Anthropic's web search, so she is told never to put client or position details into a search.
+- **Roles.** Eileen works as the team's financial analyst (news, announcements, filings), administrative staff (records, forms, letters, emails) and compliance officer (SFC rules, CPT, accounting standards, citing official sources). Her analysis is internal research, and compliance judgements stay with the Responsible Officers.
+- **Records and forms.** She can add a row to a records spreadsheet (.xlsx or .csv, for example a CPT attendance log), and fill in a Word (.docx) form by saving a completed copy, which she can also send into the chat. The original form is never changed. Records go in `recordsFolder`. These are changes, so they need the approver's YES, unless you set `"recordsNeedApproval": false`. Then adding records and saving new filled forms *inside the records folder only* happens without asking.
+- **Email.** With `emailFrom` set and a Google app password for that mailbox in `.env` as `EMAIL_APP_PASSWORD=...`, she can send email. Every email goes to the approver in full first and is sent only after `YES <code>`. To create the app password, sign in to Google as the mailbox, turn on 2-Step Verification, then visit myaccount.google.com/apppasswords.
 - **Reading the drive is always allowed.** It searches file names and folders, lists folders, and reads PDF, Word (.docx), Excel (.xlsx) and text files.
 - **Changes need approval.** Creating folders, saving text files, and copying or moving files are never done directly. The approver (Leo) gets a private WhatsApp message describing the exact change and a 4-digit code, and the change happens only after the reply `YES 1234`. `NO 1234` rejects it. The bot can't delete files or edit Word, Excel or PDF files.
 - **Audit log.** Every message the bot handles, every reply, file read, file sent and change is written to `logs\YYYY-MM-DD.jsonl`, one line per event.
@@ -68,6 +71,7 @@ Leave the window open. Closing it stops the bot.
 | `src/route.ts` | Mention, reply and name detection; staff and group checks |
 | `src/agent.ts` | Claude conversation, tools and the approval flow |
 | `src/drive.ts` | Search, list, read, and the approved change operations, limited to `driveRoots` |
+| `src/email.ts` | Sending approved email |
 | `src/schedule.ts` | Scheduled tasks and reports |
 | `src/audit.ts` | Daily audit log files |
 | `test/` | Tests (`npm test`) |

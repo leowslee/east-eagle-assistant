@@ -30,6 +30,12 @@ export interface Config {
   conversationIdleHours: number;
   // Let the assistant search the internet and read public web pages.
   webSearch: boolean;
+  // The assistant's mailbox. Sending needs EMAIL_APP_PASSWORD in .env and an approver's YES for every email.
+  emailFrom: string;
+  // Folder for records (attendance logs, filled forms).
+  recordsFolder: string;
+  // When false, adding records and saving new filled forms inside recordsFolder doesn't need an approver's YES.
+  recordsNeedApproval: boolean;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -46,6 +52,9 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   effort: "medium",
   conversationIdleHours: 4,
   webSearch: true,
+  emailFrom: "",
+  recordsFolder: "",
+  recordsNeedApproval: true,
   schedules: [],
 };
 

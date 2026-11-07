@@ -7,7 +7,7 @@ import ExcelJS from "exceljs";
 import { Assistant, type Messenger } from "../src/agent.js";
 import { MemoryAuditLog } from "../src/audit.js";
 import type { Config } from "../src/config.js";
-import { Drive, DriveError } from "../src/drive.js";
+import { Drive, DriveError, extractText as driveText } from "../src/drive.js";
 import { extractText, isAddressedToBot, stripAddress } from "../src/route.js";
 import { describeTiming, dueSchedules, isDue, TaskStore, validateSchedules } from "../src/schedule.js";
 import { MemoryStore } from "../src/store.js";
@@ -40,6 +40,9 @@ function config(root: string): Config {
     effort: "medium",
     conversationIdleHours: 4,
     webSearch: true,
+    emailFrom: "eileen@example.com",
+    recordsFolder: path.join(root, "Records"),
+    recordsNeedApproval: true,
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -318,4 +321,92 @@ test("agent: a paused web search turn is continued", async () => {
   const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client);
   assert.match(await a.handle(incoming("where did the HSI close?")), /26,000/);
   assert.equal(requests[1].at(-1).role, "assistant");
+});
+
+test("drive: add records to csv and xlsx", async () => {
+  const { root } = tempDrive();
+  const drive = new Drive([{ name: "X drive", path: root }]);
+  fs.mkdirSync(path.join(root, "Records"));
+  const csv = path.join(root, "Records", "cpt.csv");
+  await drive.addRecord(csv, { Name: "Leo", Course: "AML, 2026", Hours: "3" });
+  await drive.addRecord(csv, { name: "Amy", course: "Ethics", hours: "2" });
+  assert.equal(fs.readFileSync(csv, "utf8"), 'Name,Course,Hours\r\nLeo,"AML, 2026",3\r\nAmy,Ethics,2\r\n');
+  await assert.rejects(drive.addRecord(csv, { Provider: "HKSI" }), /no column "Provider"/);
+
+  const xlsx = path.join(root, "Records", "cpt.xlsx");
+  await drive.addRecord(xlsx, { Name: "Leo", Hours: "3" });
+  await drive.addRecord(xlsx, { Name: "Amy", Provider: "HKSI" });
+  const text = await driveText(xlsx, fs.readFileSync(xlsx));
+  assert.match(text, /1: Name,Hours,Provider/);
+  assert.match(text, /3: Amy,,HKSI/);
+  await assert.rejects(drive.addRecord(path.join(outsideDir(), "x.csv"), { a: "1" }), DriveError);
+});
+
+function outsideDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+}
+
+async function makeDocx(file: string, paragraphsXml: string) {
+  const JSZip = (await import("jszip")).default;
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file("word/document.xml", `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphsXml}</w:body></w:document>`);
+  fs.writeFileSync(file, await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+test("drive: fill a Word form into a new copy, even when Word split the text", async () => {
+  const { root } = tempDrive();
+  const drive = new Drive([{ name: "X drive", path: root }]);
+  const form = path.join(root, "form.docx");
+  await makeDocx(form, '<w:p><w:r><w:t>Name: </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>____</w:t></w:r></w:p><w:p><w:r><w:t>Date: {{da</w:t></w:r><w:r><w:t>te}}</w:t></w:r></w:p><w:p><w:r><w:t>Unchanged &amp; kept</w:t></w:r></w:p>');
+  const out = path.join(root, "filled.docx");
+  const r = await drive.fillWordTemplate(form, out, [
+    { find: "Name: ____", replace: "Name: Leo & Co" },
+    { find: "{{date}}", replace: "7 Nov 2026" },
+    { find: "Signature", replace: "x" },
+  ]);
+  assert.deepEqual(r.missing, ["Signature"]);
+  const text = await driveText(out, fs.readFileSync(out));
+  assert.match(text, /Name: Leo & Co/);
+  assert.match(text, /Date: 7 Nov 2026/);
+  assert.match(text, /Unchanged & kept/);
+  assert.match(await driveText(form, fs.readFileSync(form)), /Name: ____/); // original untouched
+  await assert.rejects(drive.fillWordTemplate(form, out, []), /already exists/);
+});
+
+test("agent: email waits for YES, then is sent", async () => {
+  const { root } = tempDrive();
+  const { client } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "send_email", input: { to: ["ops@example.com"], subject: "NAV", body: "Hi,\nNAV attached.\nEileen", attachments: [path.join(root, "Trading", "notes.md")] } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Waiting for Leo." }], stop_reason: "end_turn" },
+  ]);
+  const { sent, messenger } = fakeMessenger();
+  const emails: any[] = [];
+  const mailer = { from: "eileen@example.com", async send(e: any) { emails.push(e); return "id1"; } };
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client, undefined, mailer);
+  await a.handle(incoming("email ops the NAV"));
+  assert.equal(emails.length, 0);
+  const request = sent.find((s) => s.chatId === "85290000001@s.whatsapp.net")!;
+  assert.match(request.text!, /To: ops@example.com[\s\S]*NAV attached/);
+  const code = request.text!.match(/YES (\d{4})/)![1];
+  assert.match((await a.handleApproval("85290000001", "Leo", `YES ${code}`))!, /sent to ops@example.com/);
+  assert.equal(emails[0].attachments[0].filename, "notes.md");
+});
+
+test("agent: records folder can skip approval when configured", async () => {
+  const { root } = tempDrive();
+  fs.mkdirSync(path.join(root, "Records"));
+  const cfg = { ...config(root), recordsNeedApproval: false };
+  const { client } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "add_record", input: { path: path.join(root, "Records", "cpt.csv"), values: { Name: "Amy" } } }], stop_reason: "tool_use" },
+    { content: [{ type: "tool_use", id: "t2", name: "add_record", input: { path: path.join(root, "Trading", "other.csv"), values: { Name: "Amy" } } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Recorded." }], stop_reason: "end_turn" },
+  ]);
+  const { sent, messenger } = fakeMessenger();
+  const a = new Assistant(cfg, new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client);
+  await a.handle(incoming("log my CPT"));
+  assert.ok(fs.existsSync(path.join(root, "Records", "cpt.csv")));
+  assert.ok(!fs.existsSync(path.join(root, "Trading", "other.csv"))); // outside the records folder: waits for YES
+  assert.equal(sent.filter((s) => s.chatId === "85290000001@s.whatsapp.net").length, 1);
 });
