@@ -14,7 +14,7 @@ type ContentBlock = Anthropic.Beta.BetaContentBlock;
 const MAX_TOOL_ROUNDS = 15;
 // Conversations are only ever appended to (thinking blocks stay valid that way), so a long one is
 // restarted rather than trimmed.
-const MAX_CONVERSATION_CHARS = 1_200_000;
+const MAX_CONVERSATION_CHARS = 400_000;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 export const RESET_WORDS = new Set(["new", "/new", "reset", "/reset"]);
 
@@ -320,7 +320,7 @@ export class Assistant {
     });
   }
 
-  private async handleNow(msg: Incoming): Promise<string> {
+  private async handleNow(msg: Incoming, retried = false): Promise<string> {
     const who = { chat: msg.chatName, chatId: msg.chatId, sender: msg.senderName, phone: msg.senderPhone };
     this.audit.record("inbound", { ...who, text: msg.text, quoted: msg.quotedText });
 
@@ -362,6 +362,12 @@ export class Assistant {
       }
     } catch (err) {
       this.audit.record("error", { ...who, where: "claude", error: String(err) });
+      console.error(`AI service error in "${msg.chatName}": ${String(err)}`);
+      // A conversation that has grown past the model's limit: start fresh and try once more.
+      if (!retried && base > 0 && /too long|too many tokens|context|maximum/i.test(String(err))) {
+        this.store.remove(msg.chatId);
+        return this.handleNow(msg, true);
+      }
       // Nothing from this turn is saved, so the stored conversation stays valid.
       return this.reply(who, "Sorry, I couldn't reach the AI service just now. Please try again in a minute.");
     }

@@ -289,3 +289,20 @@ test("schedule: task store saves to disk and survives a restart", () => {
   assert.equal(again.due(hk("2026-11-09", "09:02")).length, 0);
   assert.equal(again.expired(hk("2026-11-10", "09:00")).length, 1);
 });
+
+test("agent: a conversation that is too long restarts and retries", async () => {
+  const { root } = tempDrive();
+  const store = new MemoryStore();
+  store.save("group1@g.us", { messages: [{ role: "user", content: "old" }, { role: "assistant", content: [{ type: "text", text: "old reply" }] }], updated: Date.now() });
+  let calls = 0;
+  const client: any = { beta: { messages: { create: async (p: any) => {
+    calls++;
+    if (p.messages.length > 1) throw new Error("400 prompt is too long: 250000 tokens > 200000 maximum");
+    return { content: [{ type: "text", text: "Hi!" }], stop_reason: "end_turn", stop_details: null };
+  } } } };
+  const { messenger } = fakeMessenger();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), store, new MemoryAuditLog(), messenger, client);
+  assert.equal(await a.handle(incoming("hi")), "Hi!");
+  assert.equal(calls, 2);
+  assert.equal(store.load("group1@g.us")!.messages.length, 2);
+});
