@@ -20,6 +20,7 @@ import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, TaskStore } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
+import { Pms } from "./pms.js";
 import { FileStore } from "./store.js";
 
 const config = loadConfig(process.argv[2] ?? "config.json");
@@ -69,7 +70,7 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const match = Object.values(groups).find((g) => g.subject.trim().toLowerCase() === name.trim().toLowerCase());
     return match ? { id: match.id, name: match.subject } : undefined;
   },
-}, undefined, tasks, mailer());
+}, undefined, tasks, mailer(), config.pmsUrl ? new Pms(config.pmsUrl) : undefined);
 
 async function groupName(jid: string): Promise<string> {
   const cached = groupNames.get(jid);

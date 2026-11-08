@@ -17,6 +17,7 @@
   "emailFrom": "eileen.gu@easteagle-am.com",
   "recordsFolder": "X:\\Trading\\Admin Records",
   "recordsNeedApproval": true,
+  "pmsUrl": "http://127.0.0.1:8765",
   "schedules": [
     {
       "name": "Morning report",

@@ -43,6 +43,7 @@ function config(root: string): Config {
     emailFrom: "eileen@example.com",
     recordsFolder: path.join(root, "Records"),
     recordsNeedApproval: true,
+    pmsUrl: "",
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -432,4 +433,29 @@ test("agent: post to another group — straight away for the approver, YES for o
   const code = request.text!.match(/YES (\d{4})/)![1];
   await amy.handleApproval("85290000001", "Leo", `YES ${code}`);
   assert.equal(sent.filter((s) => s.chatId === "inv@g.us").length, 2);
+});
+
+test("pms: compact live portfolio, largest P&L first, lines for a named group", async () => {
+  const { Pms } = await import("../src/pms.js");
+  const body = {
+    as_of: "2026-11-08T11:02:00+08:00", nav: 23944653.69,
+    pnl_cutoff: { date: "2026-11-06", local: "05:00 HKT" },
+    totals: { pnl_us: -81825.013, delta_usd: 5712772.8, extra: { nested: 1 } },
+    groups: [
+      { name: "BRK B", pnl_us: 22478.67, rows: [{ symbol: "BRK B", pnl_us: 22478.67 }] },
+      { label: "RTY options", pnl_us: -29629.03, rows: [{ symbol: "RTY 2675 P", pnl_us: -26250 }] },
+    ],
+  };
+  const urls: string[] = [];
+  const fakeFetch = (async (url: string) => { urls.push(url); return new Response(JSON.stringify(body)); }) as unknown as typeof fetch;
+  const pms = new Pms("http://127.0.0.1:8765/", fakeFetch);
+  const p = (await pms.portfolio("rty")) as any;
+  assert.equal(urls[0], "http://127.0.0.1:8765/api/portfolio");
+  assert.equal(p.totals.pnl_us, -81825.01);
+  assert.equal(p.totals.extra, undefined);
+  assert.deepEqual(p.groups.map((g: any) => g.name), ["RTY options", "BRK B"]);
+  assert.equal(p.groups[0].rows[0].pnl_us, -26250);
+  assert.equal(p.groups[1].rows, undefined);
+  const bad = new Pms("http://x", (async () => new Response("no", { status: 403 })) as unknown as typeof fetch);
+  await assert.rejects(bad.portfolio(), /403/);
 });
