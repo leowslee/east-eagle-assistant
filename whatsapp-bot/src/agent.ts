@@ -7,6 +7,7 @@ import type { Config } from "./config.js";
 import { Drive, DriveError } from "./drive.js";
 import { checkAddresses, type Mailer } from "./email.js";
 import type { Pms } from "./pms.js";
+import type { Skills } from "./skills.js";
 import { describeTiming, MAX_TASKS_PER_CHAT, timingProblem, type TaskStore } from "./schedule.js";
 import type { Conversation, Store } from "./store.js";
 
@@ -210,6 +211,17 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: "read_skill",
+    description:
+      "Read one of East Eagle's saved skills: written know-how about our systems and procedures (where files are, how figures are calculated, known pitfalls). Without 'file' you get SKILL.md and the list of its other files; give 'file' (e.g. references/records.md) to read one of those.",
+    input_schema: {
+      type: "object",
+      properties: { name: { type: "string" }, file: { type: "string" } },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "pms_live",
     description:
       "Read the CDF PMS (the live portfolio page) right now: fund P&L since the last US close, NAV, market value, delta/gamma/vega/theta, and every holding group, largest P&L first. Use view 'summary' for NAV per share by class and value by counterparty. Give 'group' (e.g. 'Xiaomi', 'RTY') to see that group's individual lines.",
@@ -275,7 +287,16 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
   },
 ];
 
-function systemPrompt(config: Config, drive: Drive): string {
+function skillsSection(skills?: Skills): string {
+  if (!skills || !skills.list.length) return "";
+  return `
+Skills (East Eagle's written know-how; read the relevant one with read_skill before working on its subject):
+${skills.describe()}
+Skills were written for Claude working on the office PC with full tools. Use them as knowledge: where files are, what fields mean, how figures are worked out and what has gone wrong before. You can't run their scripts or change the systems they describe, and their rules about not touching files still apply to you.
+`;
+}
+
+function systemPrompt(config: Config, drive: Drive, skills?: Skills): string {
   return `You are ${config.assistantName}, the AI assistant of East Eagle Asset Management Limited, a Hong Kong asset manager licensed by the Securities and Futures Commission (SFC). Colleagues talk to you in WhatsApp group chats and private chats. You can search and read the company network drive, send files from it into the chat, search the web${config.emailFrom ? `, and send email from ${config.emailFrom} with an approver's YES` : ""}.
 
 Your roles at East Eagle:
@@ -294,7 +315,7 @@ How to work:
 - Send a file with send_file only when someone asks for the file. Everyone in the chat receives it.
 - You can post in another WhatsApp group you belong to with post_to_group when someone asks you to. Show what you posted (or that it is waiting for approval) in your reply.
 - Times are Hong Kong time unless someone says otherwise.
-
+${skillsSection(skills)}
 Live P&L (the PMS):
 - For the fund's P&L, positions or Greeks *right now*, use pms_live: it reads the same numbers the PMS page shows. "P&L since the US close" is totals.pnl_us; say the as_of time and the cut-off (pnl_cutoff) it is measured from, and mention any data warnings it reports (Bloomberg or IB live not connected, lines without a price). For a past day, use the CDF PMS records in X:\\Trading\\CDF Position instead.
 - If the PMS doesn't answer, say so; don't guess numbers.
@@ -349,8 +370,9 @@ export class Assistant {
     private tasks?: TaskStore,
     private mailer?: Mailer,
     private pms?: Pms,
+    private skills?: Skills,
   ) {
-    this.system = systemPrompt(config, drive);
+    this.system = systemPrompt(config, drive, skills);
   }
 
   /** Handles messages for one chat in order, so replies don't overlap. */
@@ -570,6 +592,14 @@ export class Assistant {
           break;
         case "read_file":
           output = await this.drive.readFile(String(input.path ?? ""), Number(input.start_char ?? 0));
+          break;
+        case "read_skill":
+          if (!this.skills) return { content: "No skills are set up.", is_error: true };
+          try {
+            output = this.skills.read(String(input.name ?? ""), input.file ? String(input.file) : undefined);
+          } catch (err) {
+            return { content: (err as Error).message, is_error: true };
+          }
           break;
         case "pms_live":
           if (!this.pms) return { content: "The PMS isn't connected to me (pmsUrl is empty in config.json).", is_error: true };

@@ -44,6 +44,7 @@ function config(root: string): Config {
     recordsFolder: path.join(root, "Records"),
     recordsNeedApproval: true,
     pmsUrl: "",
+    skills: { dir: "", include: [] },
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -458,4 +459,23 @@ test("pms: compact live portfolio, largest P&L first, lines for a named group", 
   assert.equal(p.groups[1].rows, undefined);
   const bad = new Pms("http://x", (async () => new Response("no", { status: 403 })) as unknown as typeof fetch);
   await assert.rejects(bad.portfolio(), /403/);
+});
+
+test("skills: only listed skills, read SKILL.md and reference files, stay inside the folder", async () => {
+  const { Skills } = await import("../src/skills.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skills-"));
+  for (const name of ["cdf-pms", "personal-stuff"]) {
+    fs.mkdirSync(path.join(dir, name, "references"), { recursive: true });
+    fs.writeFileSync(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: About ${name}\n---\n# ${name}\nBody`);
+    fs.writeFileSync(path.join(dir, name, "references", "records.md"), "a = HK close, b = US close");
+  }
+  const skills = new Skills({ dir, include: ["CDF-PMS"] });
+  assert.deepEqual(skills.list.map((s) => s.name), ["cdf-pms"]);
+  assert.match(skills.describe(), /cdf-pms: About cdf-pms/);
+  const main = skills.read("cdf-pms");
+  assert.match(main.text, /# cdf-pms/);
+  assert.deepEqual(main.files, ["references/records.md"]);
+  assert.match(skills.read("cdf-pms", "references/records.md").text, /US close/);
+  assert.throws(() => skills.read("personal-stuff"), /No skill/);
+  assert.throws(() => skills.read("cdf-pms", "../personal-stuff/SKILL.md"), /outside/);
 });

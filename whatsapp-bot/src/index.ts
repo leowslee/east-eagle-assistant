@@ -21,6 +21,7 @@ import { configKey, dueSchedules, hkParts, TaskStore } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
 import { Pms } from "./pms.js";
+import { Skills } from "./skills.js";
 import { FileStore } from "./store.js";
 
 const config = loadConfig(process.argv[2] ?? "config.json");
@@ -55,6 +56,9 @@ function mailer(): SmtpMailer | undefined {
   return new SmtpMailer(config.emailFrom, pass, config.assistantName);
 }
 
+const skills = new Skills(config.skills);
+if (config.skills.dir) console.log(`Skills: ${skills.list.map((s) => s.name).join(", ") || "none found"} (from ${config.skills.dir})`);
+
 const tasks = new TaskStore(path.join(config.dataDir, "schedules.json"));
 
 const assistant = new Assistant(config, drive, new FileStore(path.join(config.dataDir, "conversations")), audit, {
@@ -70,7 +74,7 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const match = Object.values(groups).find((g) => g.subject.trim().toLowerCase() === name.trim().toLowerCase());
     return match ? { id: match.id, name: match.subject } : undefined;
   },
-}, undefined, tasks, mailer(), config.pmsUrl ? new Pms(config.pmsUrl) : undefined);
+}, undefined, tasks, mailer(), config.pmsUrl ? new Pms(config.pmsUrl) : undefined, skills);
 
 async function groupName(jid: string): Promise<string> {
   const cached = groupNames.get(jid);
