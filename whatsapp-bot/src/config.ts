@@ -36,6 +36,8 @@ export interface Config {
   recordsFolder: string;
   // When false, adding records and saving new filled forms inside recordsFolder doesn't need an approver's YES.
   recordsNeedApproval: boolean;
+  // The CDF PMS server (live portfolio page). Empty turns the pms_live tool off.
+  pmsUrl: string;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -55,6 +57,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   emailFrom: "",
   recordsFolder: "",
   recordsNeedApproval: true,
+  pmsUrl: "http://127.0.0.1:8765",
   schedules: [],
 };
 

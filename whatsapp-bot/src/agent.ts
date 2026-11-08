@@ -6,6 +6,7 @@ import { hkTime } from "./audit.js";
 import type { Config } from "./config.js";
 import { Drive, DriveError } from "./drive.js";
 import { checkAddresses, type Mailer } from "./email.js";
+import type { Pms } from "./pms.js";
 import { describeTiming, MAX_TASKS_PER_CHAT, timingProblem, type TaskStore } from "./schedule.js";
 import type { Conversation, Store } from "./store.js";
 
@@ -209,6 +210,19 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: "pms_live",
+    description:
+      "Read the CDF PMS (the live portfolio page) right now: fund P&L since the last US close, NAV, market value, delta/gamma/vega/theta, and every holding group, largest P&L first. Use view 'summary' for NAV per share by class and value by counterparty. Give 'group' (e.g. 'Xiaomi', 'RTY') to see that group's individual lines.",
+    input_schema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["portfolio", "summary"] },
+        group: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "post_to_group",
     description:
       "Post a message (and optionally a file from the drive) in another WhatsApp group you are a member of, by the group's name. Write the message exactly as it should appear. If an approver asked for it, it is sent straight away; anyone else's request waits for an approver's YES.",
@@ -281,6 +295,10 @@ How to work:
 - You can post in another WhatsApp group you belong to with post_to_group when someone asks you to. Show what you posted (or that it is waiting for approval) in your reply.
 - Times are Hong Kong time unless someone says otherwise.
 
+Live P&L (the PMS):
+- For the fund's P&L, positions or Greeks *right now*, use pms_live: it reads the same numbers the PMS page shows. "P&L since the US close" is totals.pnl_us; say the as_of time and the cut-off (pnl_cutoff) it is measured from, and mention any data warnings it reports (Bloomberg or IB live not connected, lines without a price). For a past day, use the CDF PMS records in X:\\Trading\\CDF Position instead.
+- If the PMS doesn't answer, say so; don't guess numbers.
+
 The internet:
 - You can search the web (web_search) and read web pages (web_fetch) for public information: market news, company announcements, prices, regulations, economic data. Say where the information comes from and how recent it is. Use the drive, not the web, for anything about East Eagle's own funds, positions or clients.
 - Never put client names, positions, account numbers or other confidential East Eagle information into a web search.
@@ -330,6 +348,7 @@ export class Assistant {
     private client: Pick<Anthropic, "beta"> = new Anthropic(),
     private tasks?: TaskStore,
     private mailer?: Mailer,
+    private pms?: Pms,
   ) {
     this.system = systemPrompt(config, drive);
   }
@@ -551,6 +570,10 @@ export class Assistant {
           break;
         case "read_file":
           output = await this.drive.readFile(String(input.path ?? ""), Number(input.start_char ?? 0));
+          break;
+        case "pms_live":
+          if (!this.pms) return { content: "The PMS isn't connected to me (pmsUrl is empty in config.json).", is_error: true };
+          output = input.view === "summary" ? await this.pms.summary() : await this.pms.portfolio(input.group);
           break;
         case "send_file": {
           const file = await this.drive.fileForSending(String(input.path ?? ""));
