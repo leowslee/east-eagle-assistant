@@ -410,3 +410,26 @@ test("agent: records folder can skip approval when configured", async () => {
   assert.ok(!fs.existsSync(path.join(root, "Trading", "other.csv"))); // outside the records folder: waits for YES
   assert.equal(sent.filter((s) => s.chatId === "85290000001@s.whatsapp.net").length, 1);
 });
+
+test("agent: post to another group — straight away for the approver, YES for others", async () => {
+  const { root } = tempDrive();
+  const script = () => fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "post_to_group", input: { group: "east eagle am inv", text: "P&L posted" } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "OK." }], stop_reason: "end_turn" },
+  ]);
+  const { sent, messenger } = fakeMessenger();
+  messenger.findGroup = async (name) => (name.toLowerCase() === "east eagle am inv" ? { id: "inv@g.us", name: "East Eagle AM Inv" } : undefined);
+
+  const leo = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, script().client);
+  await leo.handle({ ...incoming("post it", "Leo", "85290000001"), chatId: "leo@s.whatsapp.net", isGroup: false });
+  assert.deepEqual(sent.filter((s) => s.chatId === "inv@g.us").map((s) => s.text), ["P&L posted"]);
+
+  const amy = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, script().client);
+  await amy.handle(incoming("post it"));
+  assert.equal(sent.filter((s) => s.chatId === "inv@g.us").length, 1); // not yet
+  const request = sent.find((s) => s.chatId === "85290000001@s.whatsapp.net")!;
+  assert.match(request.text!, /Post in WhatsApp group "East Eagle AM Inv"/);
+  const code = request.text!.match(/YES (\d{4})/)![1];
+  await amy.handleApproval("85290000001", "Leo", `YES ${code}`);
+  assert.equal(sent.filter((s) => s.chatId === "inv@g.us").length, 2);
+});

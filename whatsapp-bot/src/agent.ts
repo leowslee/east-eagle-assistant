@@ -34,6 +34,8 @@ export interface Incoming {
 export interface Messenger {
   sendText(chatId: string, text: string): Promise<void>;
   sendFile(chatId: string, path: string, fileName: string): Promise<void>;
+  /** Finds a group the assistant is a member of, by its name (case-insensitive). */
+  findGroup?(name: string): Promise<{ id: string; name: string } | undefined>;
 }
 
 /** A drive change waiting for an approver's YES. */
@@ -49,7 +51,7 @@ export interface PendingChange {
 }
 
 const APPROVAL_TTL_MS = 24 * 3600_000;
-const CHANGE_TOOLS = new Set(["create_folder", "write_text_file", "copy_file", "move_file", "add_record", "fill_word_form", "send_email"]);
+const CHANGE_TOOLS = new Set(["create_folder", "write_text_file", "copy_file", "move_file", "add_record", "fill_word_form", "send_email", "post_to_group"]);
 // Changes that may skip approval inside the records folder when config.recordsNeedApproval is false.
 const RECORD_TOOLS = new Set(["add_record", "fill_word_form"]);
 const TASK_TOOLS = new Set(["schedule_task", "list_scheduled_tasks", "cancel_scheduled_task"]);
@@ -207,6 +209,21 @@ const TOOLS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: "post_to_group",
+    description:
+      "Post a message (and optionally a file from the drive) in another WhatsApp group you are a member of, by the group's name. Write the message exactly as it should appear. If an approver asked for it, it is sent straight away; anyone else's request waits for an approver's YES.",
+    input_schema: {
+      type: "object",
+      properties: {
+        group: { type: "string", description: "The group's name as shown in WhatsApp." },
+        text: { type: "string" },
+        file: { type: "string", description: "Optional path of a drive file to send after the message." },
+      },
+      required: ["group", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "schedule_task",
     description:
       "Set up a task that you will carry out at a set time in this chat, repeating on chosen days or once on a date, and post the result here. The instruction is run later exactly as written, so make it complete and self-contained (which files or folders, what to check, what to report). Times are Hong Kong time.",
@@ -261,6 +278,7 @@ How to work:
 - Replies are read on a phone. Keep them short and plain: a few sentences or a short list. WhatsApp formatting only: *bold*, _italic_, and "-" bullets. No tables or headings.
 - When you use a file, name it and give its folder so people can open it themselves. Quote figures exactly as they appear in the file, and say which file and date they come from.
 - Send a file with send_file only when someone asks for the file. Everyone in the chat receives it.
+- You can post in another WhatsApp group you belong to with post_to_group when someone asks you to. Show what you posted (or that it is waiting for approval) in your reply.
 - Times are Hong Kong time unless someone says otherwise.
 
 The internet:
@@ -392,6 +410,14 @@ export class Assistant {
         }
         await this.mailer.send({ to: checkAddresses(i.to), cc: checkAddresses(i.cc), subject: String(i.subject), text: String(i.body), attachments });
         return `Email "${i.subject}" sent to ${checkAddresses(i.to).join(", ")}`;
+      }
+      case "post_to_group": {
+        const group = await this.messenger.findGroup?.(String(i.group));
+        if (!group) throw new DriveError(`I'm not in a group called "${i.group}".`);
+        const file = i.file ? await this.drive.fileForSending(String(i.file)) : undefined;
+        await this.messenger.sendText(group.id, String(i.text));
+        if (file) await this.messenger.sendFile(group.id, file.path, file.name);
+        return `Posted in "${group.name}"${file ? ` with ${file.name}` : ""}`;
       }
       default:
         throw new DriveError(`Unknown change ${change.tool}`);
@@ -599,6 +625,28 @@ export class Assistant {
     msg: Incoming,
     who: Record<string, string>,
   ): Promise<{ content: string; is_error?: boolean }> {
+    if (tool === "post_to_group") {
+      if (!this.messenger.findGroup) return { content: "Posting to other groups isn't available.", is_error: true };
+      if (msg.scheduled) return { content: "A scheduled task can only post in its own chat.", is_error: true };
+      const group = await this.messenger.findGroup(String(input.group ?? ""));
+      if (!group) return { content: `I'm not a member of a group called "${input.group}". Check the exact name.`, is_error: true };
+      input = { ...input, group: group.name };
+      // The approver asking is their authorisation.
+      if (this.config.approvers.includes(msg.senderPhone)) {
+        const change: PendingChange = {
+          code: "-", tool, input, summary: describeChange(tool, input), chatId: msg.chatId, chatName: msg.chatName, requestedBy: msg.senderName, created: Date.now(),
+        };
+        try {
+          const result = await this.applyChange(change);
+          this.audit.record("change_applied", { ...who, code: "requested by approver", tool, input, result });
+          return { content: `Done: ${result}` };
+        } catch (err) {
+          const message = err instanceof DriveError ? err.message : String(err);
+          this.audit.record("change_failed", { ...who, tool, input, error: message });
+          return { content: message, is_error: true };
+        }
+      }
+    }
     if (tool === "send_email") {
       if (!this.mailer) return { content: "Email isn't set up on this computer, so I can't send email. Offer the text so they can send it themselves.", is_error: true };
       try {
@@ -662,6 +710,8 @@ export function describeChange(tool: string, i: Record<string, any>): string {
       return `Add a row to ${i.path}:\n${Object.entries(i.values ?? {}).map(([k, v]) => `- ${k}: ${v}`).join("\n")}`;
     case "fill_word_form":
       return `Fill in form ${i.template}\nand save it as ${i.output}:\n${(i.replacements ?? []).map((r: any) => `- "${r.find}" → "${r.replace}"`).join("\n")}${i.send_to_chat ? "\nThen send it to the chat." : ""}`;
+    case "post_to_group":
+      return `Post in WhatsApp group "${i.group}":\n\n${String(i.text ?? "").slice(0, 3000)}${i.file ? `\n\nWith file: ${i.file}` : ""}`;
     case "send_email":
       return `Send email from the assistant's mailbox\nTo: ${(i.to ?? []).join(", ")}${i.cc?.length ? `\nCc: ${i.cc.join(", ")}` : ""}\nSubject: ${i.subject}${i.attachments?.length ? `\nAttachments: ${i.attachments.join(", ")}` : ""}\n\n${String(i.body ?? "").slice(0, 3000)}`;
     default:

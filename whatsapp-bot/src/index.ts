@@ -64,6 +64,11 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const mimetype = MIME[path.extname(fileName).toLowerCase()] ?? "application/octet-stream";
     await sock.sendMessage(chatId, { document: { url: filePath }, fileName, mimetype });
   },
+  async findGroup(name) {
+    const groups = await sock.groupFetchAllParticipating();
+    const match = Object.values(groups).find((g) => g.subject.trim().toLowerCase() === name.trim().toLowerCase());
+    return match ? { id: match.id, name: match.subject } : undefined;
+  },
 }, undefined, tasks, mailer());
 
 async function groupName(jid: string): Promise<string> {
