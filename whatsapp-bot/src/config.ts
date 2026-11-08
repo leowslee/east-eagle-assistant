@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { validateSchedules, type Schedule } from "./schedule.js";
+import type { SkillsConfig } from "./skills.js";
 
 export interface DriveRoot {
   name: string; // what staff and Claude call it, e.g. "X drive"
@@ -38,6 +39,8 @@ export interface Config {
   recordsNeedApproval: boolean;
   // The CDF PMS server (live portfolio page). Empty turns the pms_live tool off.
   pmsUrl: string;
+  // Claude skills on this PC that the assistant may read (only the listed folders).
+  skills: SkillsConfig;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -58,6 +61,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   recordsFolder: "",
   recordsNeedApproval: true,
   pmsUrl: "http://127.0.0.1:8765",
+  skills: { dir: "", include: [] },
   schedules: [],
 };
 

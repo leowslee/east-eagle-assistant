@@ -18,6 +18,7 @@
   "recordsFolder": "X:\\Trading\\Admin Records",
   "recordsNeedApproval": true,
   "pmsUrl": "http://127.0.0.1:8765",
+  "skills": { "dir": "C:\\Users\\Leo\\.claude\\skills", "include": ["cdf-pms", "cdf-middle-office", "middle-office-trade-booking"] },
   "schedules": [
     {
       "name": "Morning report",
