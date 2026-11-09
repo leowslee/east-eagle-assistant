@@ -45,6 +45,7 @@ function config(root: string): Config {
     recordsNeedApproval: true,
     pmsUrl: "",
     skills: { dir: "", include: [] },
+    markAllRead: true,
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }

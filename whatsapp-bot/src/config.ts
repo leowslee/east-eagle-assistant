@@ -41,6 +41,8 @@ export interface Config {
   pmsUrl: string;
   // Claude skills on this PC that the assistant may read (only the listed folders).
   skills: SkillsConfig;
+  // Mark every incoming message as read (blue ticks), so the assistant's phone doesn't pile up unread chats.
+  markAllRead: boolean;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -62,6 +64,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   recordsNeedApproval: true,
   pmsUrl: "http://127.0.0.1:8765",
   skills: { dir: "", include: [] },
+  markAllRead: true,
   schedules: [],
 };
 
