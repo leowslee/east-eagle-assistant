@@ -246,6 +246,12 @@ async function connect(): Promise<void> {
   });
   sock.ev.on("messages.upsert", ({ messages, type }) => {
     if (type !== "notify") return;
+    if (config.markAllRead) {
+      const keys = messages
+        .map((m) => m.key)
+        .filter((k) => k.remoteJid && !k.fromMe && !isJidBroadcast(k.remoteJid) && !k.remoteJid.endsWith("@newsletter"));
+      if (keys.length) sock.readMessages(keys).catch(() => {});
+    }
     for (const m of messages) {
       onMessage(m).catch((err) => {
         console.error("Failed to handle a message", err);
