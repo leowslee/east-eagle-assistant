@@ -162,6 +162,11 @@ export class TaskStore {
     return this.state.tasks.filter((t) => t.date && t.date < date);
   }
 
+  unmarkRun(key: string): void {
+    delete this.state.lastRuns[key];
+    this.save();
+  }
+
   markRun(key: string, date: string): void {
     this.state.lastRuns[key] = date;
     this.save();

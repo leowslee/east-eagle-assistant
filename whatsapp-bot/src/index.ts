@@ -13,11 +13,11 @@ import makeWASocket, {
 } from "baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
-import { Assistant } from "./agent.js";
+import { AI_UNAVAILABLE, Assistant } from "./agent.js";
 import { FileAuditLog } from "./audit.js";
 import { loadConfig } from "./config.js";
 import { Drive } from "./drive.js";
-import { configKey, dueSchedules, hkParts, TaskStore } from "./schedule.js";
+import { configKey, dueSchedules, hkParts, isDue, TaskStore, type Timing } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
 import { Pms } from "./pms.js";
@@ -162,8 +162,16 @@ async function groupIdsByName(): Promise<Map<string, string>> {
   return byName;
 }
 
-async function runTask(key: string, chatId: string, chatName: string, task: { name: string; prompt: string; createdBy: string; id: string }) {
-  if (runningTasks.has(key)) return;
+// A task that hit an AI service outage is tried again after this long, while it is still inside its catch-up window.
+const RETRY_MS = 10 * 60_000;
+const retryAfter = new Map<string, number>();
+
+/** Runs a scheduled task. Returns false if it will be retried later. */
+async function runTask(
+  key: string, chatId: string, chatName: string,
+  task: Timing & { name: string; prompt: string; createdBy: string; id: string },
+): Promise<boolean> {
+  if (runningTasks.has(key) || (retryAfter.get(key) ?? 0) > Date.now()) return false;
   runningTasks.add(key);
   // Marked before running, so a crash part-way can't post the same report twice.
   tasks.markRun(key, hkParts(new Date()).date);
@@ -173,7 +181,22 @@ async function runTask(key: string, chatId: string, chatName: string, task: { na
       chatId, chatName, isGroup: Boolean(isJidGroup(chatId)), senderName: "Scheduled task", senderPhone: "", text: task.prompt,
       scheduled: { id: task.id, name: task.name, createdBy: task.createdBy },
     });
+    if (reply === AI_UNAVAILABLE) {
+      const retryAt = new Date(Date.now() + RETRY_MS);
+      if (isDue(task, retryAt, undefined)) {
+        tasks.unmarkRun(key);
+        retryAfter.set(key, retryAt.getTime());
+        audit.record("task_retry", { key, chat: chatName, name: task.name, at: retryAt.toISOString() });
+        return false;
+      }
+      retryAfter.delete(key);
+      audit.record("task_failed", { key, chat: chatName, name: task.name });
+      await sock.sendMessage(chatId, { text: `"${task.name}" didn't run today: the AI service was unavailable for the last 2 hours. Ask me to run it now once I'm answering again.` });
+      return true;
+    }
+    retryAfter.delete(key);
     await sock.sendMessage(chatId, { text: reply });
+    return true;
   } finally {
     runningTasks.delete(key);
   }
@@ -187,7 +210,7 @@ async function checkSchedules(): Promise<void> {
   }
   for (const t of tasks.due(now)) {
     runTask(t.id, t.chatId, t.chatName, t)
-      .then(() => { if (t.date) tasks.remove(t.id); })
+      .then((done) => { if (done && t.date) tasks.remove(t.id); })
       .catch((err) => audit.record("error", { where: "task", task: t.id, error: String(err) }));
   }
   const due = dueSchedules(config.schedules, now, tasks.lastRuns);
@@ -201,7 +224,7 @@ async function checkSchedules(): Promise<void> {
       console.warn(`Scheduled report "${s.name}": I'm not in a group called "${s.group}".`);
       continue;
     }
-    runTask(configKey(s), chatId, s.group, { id: "config", name: s.name, prompt: s.prompt, createdBy: "config.json" })
+    runTask(configKey(s), chatId, s.group, { ...s, id: "config", createdBy: "config.json" })
       .catch((err) => audit.record("error", { where: "schedule", name: s.name, error: String(err) }));
   }
 }
