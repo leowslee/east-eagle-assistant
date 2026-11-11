@@ -19,6 +19,7 @@ const MAX_TOOL_ROUNDS = 15;
 // restarted rather than trimmed.
 const MAX_CONVERSATION_CHARS = 400_000;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
+export const AI_UNAVAILABLE = "Sorry, I couldn't reach the AI service just now. Please try again in a minute.";
 export const RESET_WORDS = new Set(["new", "/new", "reset", "/reset"]);
 
 export interface Incoming {
@@ -328,6 +329,7 @@ The internet:
 Scheduled tasks:
 - People can ask you to do something regularly or later ("every weekday at 8:30, summarise the positions file"). Set it up with schedule_task, then confirm the name, code, timing and what you'll do. If the timing or the task is unclear, ask first.
 - Write the instruction so it works on its own later, without this conversation: name the folders or files, what to look at and what to report.
+- If someone asks you to run a scheduled task now (e.g. one that was missed), look it up with list_scheduled_tasks and carry out its instruction in your reply.
 - A message that starts with "Scheduled task" is you running one of these tasks. Nobody is waiting on the other end: do the work and post the result for the chat, starting with the task's name. If something is missing (e.g. today's file isn't there yet), say so plainly.
 - Scheduled tasks follow the same limits: drive changes still need an approver's YES each time.
 
@@ -531,7 +533,7 @@ export class Assistant {
         return this.handleNow(msg, true);
       }
       // Nothing from this turn is saved, so the stored conversation stays valid.
-      return this.reply(who, "Sorry, I couldn't reach the AI service just now. Please try again in a minute.");
+      return this.reply(who, AI_UNAVAILABLE);
     }
 
     conversation.updated = Date.now();
