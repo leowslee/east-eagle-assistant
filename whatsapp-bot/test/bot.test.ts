@@ -48,6 +48,7 @@ function config(root: string): Config {
     markAllRead: true,
     outboxDir: "",
     outboxDefaultTo: "",
+    orderInboxDir: "",
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -589,4 +590,24 @@ test("outbox sends a message without \"to\" to the default group", async () => {
     { chatId: "123@g.us", text: "AAPL hit stop" },
     { chatId: "85290000001@s.whatsapp.net", text: "private" },
   ]);
+});
+
+// ---------- order approvals inbox ----------
+import { parseOrderDecision, writeOrderDecision } from "../src/inbox.js";
+
+test("order decisions are read only from APPROVE/REJECT plus a 4-character code", () => {
+  assert.deepEqual(parseOrderDecision("APPROVE AB12"), { id: "AB12", decision: "approve" });
+  assert.deepEqual(parseOrderDecision(" reject x9z1 "), { id: "X9Z1", decision: "reject" });
+  assert.equal(parseOrderDecision("approve AB123"), undefined);
+  assert.equal(parseOrderDecision("please approve AB12"), undefined);
+  assert.equal(parseOrderDecision("YES 1234"), undefined);
+  assert.equal(parseOrderDecision("APPROVE"), undefined);
+});
+
+test("order decisions are written as JSON with no .tmp left behind", () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "inbox-")), "quant-platform");
+  const file = writeOrderDecision(dir, { id: "AB12", decision: "approve", from: "Leo", time: "2026-11-16T05:50:00+08:00" });
+  assert.deepEqual(fs.readdirSync(dir), [path.basename(file)]);
+  assert.ok(file.endsWith(".json"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { id: "AB12", decision: "approve", from: "Leo", time: "2026-11-16T05:50:00+08:00" });
 });

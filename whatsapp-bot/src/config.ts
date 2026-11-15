@@ -47,6 +47,8 @@ export interface Config {
   outboxDir: string;
   // Where an outbox message goes when its file has no "to": a group name or a staff name.
   outboxDefaultTo: string;
+  // Where Leo's private "APPROVE XXXX" / "REJECT XXXX" replies to the trading program are written. Empty turns it off.
+  orderInboxDir: string;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -71,6 +73,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   markAllRead: true,
   outboxDir: "",
   outboxDefaultTo: "",
+  orderInboxDir: "",
   schedules: [],
 };
 
@@ -85,6 +88,7 @@ export function loadConfig(file = "config.json"): Config {
   config.dataDir = path.resolve(config.dataDir);
   config.logDir = path.resolve(config.logDir);
   if (config.outboxDir) config.outboxDir = path.resolve(config.outboxDir);
+  if (config.orderInboxDir) config.orderInboxDir = path.resolve(config.orderInboxDir);
   validateSchedules(config.schedules);
   if (config.driveRoots.length === 0) throw new Error("config.json: driveRoots is empty");
   return config;

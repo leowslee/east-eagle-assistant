@@ -20,6 +20,7 @@ import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, isDue, TaskStore, type Timing } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
+import { parseOrderDecision, writeOrderDecision } from "./inbox.js";
 import { Outbox } from "./outbox.js";
 import { Pms } from "./pms.js";
 import { Skills } from "./skills.js";
@@ -106,6 +107,11 @@ async function senderPhone(msg: WAMessage): Promise<string | undefined> {
   return undefined;
 }
 
+/** ISO time in Hong Kong, e.g. 2026-11-16T05:50:00+08:00. */
+function hkIso(d: Date): string {
+  return new Date(d.getTime() + 8 * 3600_000).toISOString().slice(0, 19) + "+08:00";
+}
+
 async function onMessage(msg: WAMessage): Promise<void> {
   const chatId = msg.key.remoteJid;
   if (!chatId || msg.key.fromMe || isJidBroadcast(chatId) || chatId.endsWith("@newsletter") || !msg.message) return;
@@ -125,6 +131,23 @@ async function onMessage(msg: WAMessage): Promise<void> {
   }
   if (!staff && !(isGroup && config.answerAnyGroupMember)) {
     audit.record("ignored", { reason: "not on staff list", chat: chatName, chatId, phone, pushName: msg.pushName, text: parsed.text });
+    return;
+  }
+
+  // Leo's approve/reject for an order from the trading program: only his own private messages count.
+  const order = config.orderInboxDir && !isGroup && phone && phone === config.approvers[0] ? parseOrderDecision(parsed.text) : undefined;
+  if (order) {
+    const decision = { ...order, from: name, time: hkIso(new Date()) };
+    let reply: string;
+    try {
+      const file = writeOrderDecision(config.orderInboxDir, decision);
+      audit.record("order_decision", { ...decision, file });
+      reply = `${order.decision === "approve" ? "Approved" : "Rejected"} ${order.id}. I've passed it to the trading program.`;
+    } catch (err) {
+      audit.record("error", { where: "order_decision", ...decision, error: String(err) });
+      reply = `I couldn't pass ${order.decision} ${order.id} to the trading program: ${String(err)}`;
+    }
+    await sock.sendMessage(chatId, { text: reply }, { quoted: msg });
     return;
   }
 
