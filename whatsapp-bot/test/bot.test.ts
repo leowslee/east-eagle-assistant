@@ -49,6 +49,7 @@ function config(root: string): Config {
     outboxDir: "",
     outboxDefaultTo: "",
     orderInboxDir: "",
+    orderApprovers: [],
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -593,7 +594,7 @@ test("outbox sends a message without \"to\" to the default group", async () => {
 });
 
 // ---------- order approvals inbox ----------
-import { parseOrderDecision, writeOrderDecision } from "../src/inbox.js";
+import { isApprovalRequest, OrderBook, parseOrderDecision, writeOrderDecision } from "../src/inbox.js";
 
 test("order decisions are read only from APPROVE/REJECT plus a 4-character code", () => {
   assert.deepEqual(parseOrderDecision("APPROVE AB12"), { id: "AB12", decision: "approve" });
@@ -610,4 +611,47 @@ test("order decisions are written as JSON with no .tmp left behind", () => {
   assert.deepEqual(fs.readdirSync(dir), [path.basename(file)]);
   assert.ok(file.endsWith(".json"));
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { id: "AB12", decision: "approve", from: "Leo", time: "2026-11-16T05:50:00+08:00" });
+});
+
+test("the first decision on an order code wins, even after a restart", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "orders-"));
+  const dir = path.join(base, "inbox");
+  const state = path.join(base, "data", "orders.json");
+  const now = new Date().toISOString();
+  const book = new OrderBook(dir, state);
+  assert.equal(book.decide({ id: "AB12", decision: "approve", from: "Gary", time: now }).status, "written");
+  const again = new OrderBook(dir, state).decide({ id: "AB12", decision: "reject", from: "Leo", time: now });
+  assert.equal(again.status, "already");
+  assert.equal(again.status === "already" && again.earlier.from, "Gary");
+  assert.equal(fs.readdirSync(dir).length, 1);
+});
+
+test("order approval requests are recognised", () => {
+  assert.ok(isApprovalRequest("OMS APPROVAL NEEDED AB12: BUY 100 AAPL"));
+  assert.ok(!isApprovalRequest("Filled 100 AAPL"));
+});
+
+test("outbox also posts to extra chats, without repeating them on a retry", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "outbox-"));
+  const sent: string[] = [];
+  let fail = true;
+  const outbox = new Outbox(dir, {
+    async resolve(to) {
+      return { leo: "1@s.whatsapp.net", "quant group": "2@g.us" }[to.toLowerCase()] ? { chatId: { leo: "1@s.whatsapp.net", "quant group": "2@g.us" }[to.toLowerCase()]!, name: to } : undefined;
+    },
+    async sendText(chatId) {
+      if (chatId === "2@g.us" && fail) throw new Error("down");
+      sent.push(chatId);
+    },
+    fallbackChatId: "1@s.whatsapp.net",
+    defaultTo: "Quant group",
+    alsoTo: (m) => (isApprovalRequest(m.text) ? ["Leo", "Quant group"] : []),
+    audit: new MemoryAuditLog(),
+  });
+  fs.writeFileSync(path.join(dir, "a.json"), JSON.stringify({ to: "Leo", text: "OMS APPROVAL NEEDED AB12" }));
+  await outbox.check();
+  fail = false;
+  await outbox.check();
+  assert.deepEqual(sent, ["1@s.whatsapp.net", "2@g.us"]);
+  assert.ok(fs.existsSync(path.join(dir, "sent", "a.json")));
 });

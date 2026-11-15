@@ -27,6 +27,8 @@ export interface OutboxDeps {
   fallbackChatId: string;
   /** Where a message goes when its file has no "to", e.g. "East Eagle Quant Trading". */
   defaultTo?: string;
+  /** Other chats (names, as for "to") a message should also go to. */
+  alsoTo?(msg: OutboxMessage): string[];
   audit: AuditLog;
 }
 
@@ -38,6 +40,8 @@ export class Outbox {
   private sendErrors = new Set<string>();
   // Posted but couldn't be moved (e.g. the file was still open): don't post again, just retry the move.
   private delivered = new Set<string>();
+  // Chats a file has already been posted to, so a retry after a failure doesn't post twice.
+  private posted = new Map<string, Set<string>>();
 
   constructor(private dir: string, private deps: OutboxDeps) {}
 
@@ -85,22 +89,33 @@ export class Outbox {
       return;
     }
 
+    // Most messages go to one chat; some (e.g. order approval requests) also go to others.
+    const names = [msg.to, ...(this.deps.alsoTo?.(msg) ?? [])].filter((n, i, all) => n && all.findIndex((x) => x.toLowerCase() === n.toLowerCase()) === i);
+    const done = this.posted.get(name) ?? new Set<string>();
+    this.posted.set(name, done);
     try {
-      const target = await this.deps.resolve(msg.to);
-      if (target) {
-        await this.deps.sendText(target.chatId, msg.text);
-        this.deps.audit.record("outbox_sent", { file: name, id: msg.id, source: msg.source, level: msg.level, to: target.name, chatId: target.chatId, text: msg.text });
-      } else {
-        const why = `I couldn't post this to "${msg.to}": that isn't a staff member's name or a group I'm in.`;
-        await this.deps.sendText(this.deps.fallbackChatId, `${why}\n\nFrom ${msg.source || "the outbox"}${msg.level ? ` (${msg.level})` : ""}:\n${msg.text}`);
-        this.deps.audit.record("outbox_unknown_target", { file: name, id: msg.id, source: msg.source, to: msg.to, text: msg.text });
+      for (const to of names) {
+        const target = await this.deps.resolve(to);
+        if (target) {
+          if (done.has(target.chatId)) continue;
+          await this.deps.sendText(target.chatId, msg.text);
+          done.add(target.chatId);
+          this.deps.audit.record("outbox_sent", { file: name, id: msg.id, source: msg.source, level: msg.level, to: target.name, chatId: target.chatId, text: msg.text });
+        } else {
+          if (done.has(`unknown:${to}`)) continue;
+          const why = `I couldn't post this to "${to}": that isn't a staff member's name or a group I'm in.`;
+          await this.deps.sendText(this.deps.fallbackChatId, `${why}\n\nFrom ${msg.source || "the outbox"}${msg.level ? ` (${msg.level})` : ""}:\n${msg.text}`);
+          done.add(`unknown:${to}`);
+          this.deps.audit.record("outbox_unknown_target", { file: name, id: msg.id, source: msg.source, to, text: msg.text });
+        }
       }
     } catch (err) {
-      // WhatsApp hiccup: leave the file and try again next time. Log it once per file.
+      // WhatsApp hiccup: leave the file and try again next time (chats already posted to aren't posted again).
       if (!this.sendErrors.has(name)) this.deps.audit.record("outbox_send_error", { file: name, id: msg.id, to: msg.to, error: String(err) });
       this.sendErrors.add(name);
       return;
     }
+    this.posted.delete(name);
     this.sendErrors.delete(name);
     if (!this.move(file, "sent")) this.delivered.add(name);
   }
