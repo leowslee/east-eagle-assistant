@@ -20,7 +20,7 @@ import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, isDue, TaskStore, type Timing } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
-import { parseOrderDecision, writeOrderDecision } from "./inbox.js";
+import { isApprovalRequest, OrderBook, parseOrderDecision } from "./inbox.js";
 import { Outbox } from "./outbox.js";
 import { Pms } from "./pms.js";
 import { Skills } from "./skills.js";
@@ -112,12 +112,66 @@ function hkIso(d: Date): string {
   return new Date(d.getTime() + 8 * 3600_000).toISOString().slice(0, 19) + "+08:00";
 }
 
+// Trading program order approvals (see inbox.ts).
+const orders = config.orderInboxDir ? new OrderBook(config.orderInboxDir, path.join(config.dataDir, "orders.json")) : undefined;
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** Handles "APPROVE XXXX" / "REJECT XXXX". Returns false if the message isn't one for the trading program. */
+async function handleOrderDecision(
+  msg: WAMessage, chatId: string, isGroup: boolean, order: { id: string; decision: "approve" | "reject" },
+): Promise<boolean> {
+  if (!orders) return false;
+  const tradingGroup = config.outboxDefaultTo;
+  if (isGroup && !(tradingGroup && sameName(await groupName(chatId), tradingGroup))) return false;
+  const phone = await senderPhone(msg);
+  const reply = (text: string) => sock.sendMessage(chatId, { text }, { quoted: msg });
+  const who = (p: string) => findStaff(config, p)?.name ?? p;
+  if (!phone || !config.orderApprovers.includes(phone)) {
+    audit.record("order_decision_refused", { ...order, chatId, phone, pushName: msg.pushName });
+    await reply(`Only ${config.orderApprovers.map(who).join(" or ")} can approve or reject orders.`);
+    return true;
+  }
+  const decision = { ...order, from: who(phone), time: hkIso(new Date()) };
+  let result;
+  try {
+    result = orders.decide(decision);
+  } catch (err) {
+    audit.record("error", { where: "order_decision", ...decision, error: String(err) });
+    await reply(`I couldn't pass ${order.decision} ${order.id} to the trading program: ${String(err)}`);
+    return true;
+  }
+  if (result.status === "already") {
+    const e = result.earlier;
+    audit.record("order_decision_duplicate", { ...decision, earlier: e });
+    await reply(`${order.id} was already ${e.decision === "approve" ? "approved" : "rejected"} by ${e.from} at ${e.time.slice(11, 16)}. Nothing changed.`);
+    return true;
+  }
+  audit.record("order_decision", { ...decision, file: result.file });
+  const text = `${order.decision === "approve" ? "✅ Approved" : "❌ Rejected"} ${order.id} (${decision.from}). Passed to the trading program.`;
+  await reply(text);
+  // Tell the other place too: the trading group and Leo's private chat.
+  const others = new Set<string>();
+  if (config.approvers[0]) others.add(`${config.approvers[0]}@s.whatsapp.net`);
+  if (tradingGroup) {
+    const id = (await groupIdsByName().catch(() => new Map<string, string>())).get(tradingGroup.trim().toLowerCase());
+    if (id) others.add(id);
+  }
+  if (!isGroup && phone !== config.approvers[0]) others.add(`${phone}@s.whatsapp.net`);
+  others.delete(chatId);
+  for (const other of others) await sock.sendMessage(other, { text }).catch((err) => audit.record("error", { where: "order_notify", chatId: other, error: String(err) }));
+  return true;
+}
+
 async function onMessage(msg: WAMessage): Promise<void> {
   const chatId = msg.key.remoteJid;
   if (!chatId || msg.key.fromMe || isJidBroadcast(chatId) || chatId.endsWith("@newsletter") || !msg.message) return;
   const isGroup = Boolean(isJidGroup(chatId));
   const parsed = extractText(msg.message);
   const bot = { ids: [sock.user?.id, sock.user?.lid].filter((x): x is string => Boolean(x)) };
+
+  // APPROVE/REJECT for the trading program counts in the trading group even without "Eileen" in front.
+  const order = parseOrderDecision(parsed.text) ?? (isGroup ? parseOrderDecision(stripAddress(parsed.text, bot, config)) : undefined);
+  if (order && orders && (await handleOrderDecision(msg, chatId, isGroup, order))) return;
 
   if (isGroup && !isAddressedToBot(parsed, bot, config)) return; // ordinary group chatter is not read or logged
   const phone = await senderPhone(msg);
@@ -131,23 +185,6 @@ async function onMessage(msg: WAMessage): Promise<void> {
   }
   if (!staff && !(isGroup && config.answerAnyGroupMember)) {
     audit.record("ignored", { reason: "not on staff list", chat: chatName, chatId, phone, pushName: msg.pushName, text: parsed.text });
-    return;
-  }
-
-  // Leo's approve/reject for an order from the trading program: only his own private messages count.
-  const order = config.orderInboxDir && !isGroup && phone && phone === config.approvers[0] ? parseOrderDecision(parsed.text) : undefined;
-  if (order) {
-    const decision = { ...order, from: name, time: hkIso(new Date()) };
-    let reply: string;
-    try {
-      const file = writeOrderDecision(config.orderInboxDir, decision);
-      audit.record("order_decision", { ...decision, file });
-      reply = `${order.decision === "approve" ? "Approved" : "Rejected"} ${order.id}. I've passed it to the trading program.`;
-    } catch (err) {
-      audit.record("error", { where: "order_decision", ...decision, error: String(err) });
-      reply = `I couldn't pass ${order.decision} ${order.id} to the trading program: ${String(err)}`;
-    }
-    await sock.sendMessage(chatId, { text: reply }, { quoted: msg });
     return;
   }
 
@@ -284,6 +321,8 @@ function startOutbox(): void {
       await sock.sendMessage(chatId, { text });
     },
     fallbackChatId: `${leo}@s.whatsapp.net`,
+    // Order approval requests go to Leo privately and to the trading group, so either can answer.
+    alsoTo: (m) => (isApprovalRequest(m.text) ? [findStaff(config, leo)?.name ?? "", config.outboxDefaultTo] : []),
     defaultTo: config.outboxDefaultTo,
     audit,
   });

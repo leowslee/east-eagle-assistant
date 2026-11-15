@@ -49,6 +49,9 @@ export interface Config {
   outboxDefaultTo: string;
   // Where Leo's private "APPROVE XXXX" / "REJECT XXXX" replies to the trading program are written. Empty turns it off.
   orderInboxDir: string;
+  // Phone numbers allowed to APPROVE/REJECT trading orders (in a private chat or the outboxDefaultTo group).
+  // Empty means the approvers list. Being here gives no say over the assistant's own YES approvals.
+  orderApprovers: string[];
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -74,6 +77,7 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   outboxDir: "",
   outboxDefaultTo: "",
   orderInboxDir: "",
+  orderApprovers: [],
   schedules: [],
 };
 
@@ -84,6 +88,7 @@ export function loadConfig(file = "config.json"): Config {
   const config: Config = { ...DEFAULTS, staff: [], approvers: [], ...raw };
   config.staff = config.staff.map((s) => ({ name: s.name, phone: digitsOnly(s.phone) }));
   config.approvers = config.approvers.map(digitsOnly);
+  config.orderApprovers = config.orderApprovers.length ? config.orderApprovers.map(digitsOnly) : config.approvers;
   config.triggerWords = config.triggerWords.map((w) => w.toLowerCase().replace(/^@/, ""));
   config.dataDir = path.resolve(config.dataDir);
   config.logDir = path.resolve(config.logDir);

@@ -21,6 +21,7 @@
   "outboxDir": "C:\\Users\\Leo\\EastEagleBot\\outbox",
   "outboxDefaultTo": "East Eagle Quant Trading",
   "orderInboxDir": "C:\\Users\\Leo\\EastEagleBot\\inbox\\quant-platform",
+  "orderApprovers": ["852 9123 4567"],
   "skills": { "dir": "C:\\Users\\Leo\\.claude\\skills", "include": ["cdf-pms", "cdf-middle-office", "middle-office-trade-booking"] },
   "schedules": [
     {
