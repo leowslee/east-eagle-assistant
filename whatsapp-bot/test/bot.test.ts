@@ -46,6 +46,8 @@ function config(root: string): Config {
     pmsUrl: "",
     skills: { dir: "", include: [] },
     markAllRead: true,
+    outboxDir: "",
+    outboxDefaultTo: "",
     schedules: [{ name: "Morning", group: "Ops team", time: "08:30", days: ["mon", "tue", "wed", "thu", "fri"], prompt: "Summarise positions" }],
   };
 }
@@ -479,4 +481,112 @@ test("skills: only listed skills, read SKILL.md and reference files, stay inside
   assert.match(skills.read("cdf-pms", "references/records.md").text, /US close/);
   assert.throws(() => skills.read("personal-stuff"), /No skill/);
   assert.throws(() => skills.read("cdf-pms", "../personal-stuff/SKILL.md"), /outside/);
+});
+
+// ---------- outbox ----------
+import { Outbox } from "../src/outbox.js";
+
+function outboxSetup(opts: { failSend?: boolean; defaultTo?: string } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "outbox-"));
+  const sent: { chatId: string; text: string }[] = [];
+  const audit = new MemoryAuditLog();
+  const state = { failSend: opts.failSend ?? false };
+  const outbox = new Outbox(dir, {
+    async resolve(to) {
+      if (to.toLowerCase() === "leo") return { chatId: "85290000001@s.whatsapp.net", name: "Leo" };
+      if (to.toLowerCase() === "cdf trading") return { chatId: "123@g.us", name: "CDF Trading" };
+      return undefined;
+    },
+    async sendText(chatId, text) {
+      if (state.failSend) throw new Error("not connected");
+      sent.push({ chatId, text });
+    },
+    fallbackChatId: "85290000001@s.whatsapp.net",
+    defaultTo: opts.defaultTo,
+    audit,
+  });
+  const drop = (name: string, body: unknown) =>
+    fs.writeFileSync(path.join(dir, name), typeof body === "string" ? body : JSON.stringify(body));
+  return { dir, sent, audit, outbox, drop, state };
+}
+
+const msg = (to: string, text = "AAPL hit stop") => ({ id: "1", time: "2026-11-15T10:00:00+08:00", source: "trader", to, level: "alert", text });
+
+test("outbox posts to Leo and to groups, then moves files to sent", async () => {
+  const { dir, sent, outbox, drop } = outboxSetup();
+  drop("a.json", msg("Leo"));
+  drop("b.json", msg("CDF Trading", "Filled 100 TSLA"));
+  drop("c.json.tmp", msg("Leo", "not yet"));
+  await outbox.check();
+  assert.deepEqual(sent, [
+    { chatId: "85290000001@s.whatsapp.net", text: "AAPL hit stop" },
+    { chatId: "123@g.us", text: "Filled 100 TSLA" },
+  ]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, "sent")).sort(), ["a.json", "b.json"]);
+  assert.ok(fs.existsSync(path.join(dir, "c.json.tmp")));
+  await outbox.check();
+  assert.equal(sent.length, 2, "nothing is posted twice");
+});
+
+test("outbox sends an unknown recipient's message to Leo with the reason", async () => {
+  const { dir, sent, outbox, drop } = outboxSetup();
+  drop("x.json", msg("Nobody Group"));
+  await outbox.check();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].chatId, "85290000001@s.whatsapp.net");
+  assert.match(sent[0].text, /Nobody Group/);
+  assert.match(sent[0].text, /AAPL hit stop/);
+  assert.ok(fs.existsSync(path.join(dir, "sent", "x.json")));
+});
+
+test("outbox moves broken files to failed and tells Leo", async () => {
+  const { dir, sent, outbox, drop } = outboxSetup();
+  drop("bad.json", "{not json");
+  drop("empty.json", { to: "Leo" });
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(path.join(dir, "bad.json"), old, old);
+  await outbox.check();
+  assert.deepEqual(fs.readdirSync(path.join(dir, "failed")).sort(), ["bad.json", "empty.json"]);
+  assert.equal(sent.length, 2);
+  assert.ok(sent.every((s) => s.chatId === "85290000001@s.whatsapp.net"));
+});
+
+test("outbox waits for a file that may still be being written", async () => {
+  const { dir, sent, outbox, drop } = outboxSetup();
+  drop("half.json", "{\"to\": \"Leo\"");
+  await outbox.check();
+  assert.equal(sent.length, 0);
+  assert.ok(fs.existsSync(path.join(dir, "half.json")));
+});
+
+test("outbox keeps the file and retries when WhatsApp is down", async () => {
+  const { dir, sent, outbox, drop, state } = outboxSetup({ failSend: true });
+  drop("a.json", msg("Leo"));
+  await outbox.check();
+  assert.ok(fs.existsSync(path.join(dir, "a.json")));
+  state.failSend = false;
+  await outbox.check();
+  assert.equal(sent.length, 1);
+  assert.ok(fs.existsSync(path.join(dir, "sent", "a.json")));
+});
+
+test("outbox doesn't overwrite an earlier file with the same name in sent", async () => {
+  const { dir, outbox, drop } = outboxSetup();
+  drop("a.json", msg("Leo"));
+  await outbox.check();
+  drop("a.json", msg("Leo", "second"));
+  await outbox.check();
+  assert.equal(fs.readdirSync(path.join(dir, "sent")).length, 2);
+});
+
+test("outbox sends a message without \"to\" to the default group", async () => {
+  const { sent, outbox, drop } = outboxSetup({ defaultTo: "CDF Trading" });
+  const { to: _to, ...noTo } = msg("ignored");
+  drop("a.json", noTo);
+  drop("b.json", msg("Leo", "private"));
+  await outbox.check();
+  assert.deepEqual(sent, [
+    { chatId: "123@g.us", text: "AAPL hit stop" },
+    { chatId: "85290000001@s.whatsapp.net", text: "private" },
+  ]);
 });

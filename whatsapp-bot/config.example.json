@@ -18,6 +18,8 @@
   "recordsFolder": "X:\\Trading\\Admin Records",
   "recordsNeedApproval": true,
   "pmsUrl": "http://127.0.0.1:8765",
+  "outboxDir": "C:\\Users\\Leo\\EastEagleBot\\outbox",
+  "outboxDefaultTo": "East Eagle Quant Trading",
   "skills": { "dir": "C:\\Users\\Leo\\.claude\\skills", "include": ["cdf-pms", "cdf-middle-office", "middle-office-trade-booking"] },
   "schedules": [
     {

@@ -20,6 +20,7 @@ import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, isDue, TaskStore, type Timing } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
+import { Outbox } from "./outbox.js";
 import { Pms } from "./pms.js";
 import { Skills } from "./skills.js";
 import { FileStore } from "./store.js";
@@ -238,6 +239,38 @@ function startScheduler(): void {
   }, 30_000);
 }
 
+// Outbox: messages from other programs on this PC, checked every 10 seconds while connected.
+let outboxStarted = false;
+function startOutbox(): void {
+  if (outboxStarted || !config.outboxDir) return;
+  outboxStarted = true;
+  const leo = config.approvers[0] ?? config.staff[0]?.phone;
+  if (!leo) {
+    console.warn("Outbox is off: config.json has no approver to tell about undeliverable messages.");
+    return;
+  }
+  const outbox = new Outbox(config.outboxDir, {
+    async resolve(to) {
+      const person = config.staff.find((s) => s.name.trim().toLowerCase() === to.trim().toLowerCase());
+      if (person) return { chatId: `${person.phone}@s.whatsapp.net`, name: person.name };
+      const groups = await sock.groupFetchAllParticipating();
+      const g = Object.values(groups).find((x) => x.subject.trim().toLowerCase() === to.trim().toLowerCase());
+      return g ? { chatId: g.id, name: g.subject } : undefined;
+    },
+    async sendText(chatId, text) {
+      await sock.sendMessage(chatId, { text });
+    },
+    fallbackChatId: `${leo}@s.whatsapp.net`,
+    defaultTo: config.outboxDefaultTo,
+    audit,
+  });
+  console.log(`Outbox: posting messages dropped in ${config.outboxDir}${config.outboxDefaultTo ? ` (default: ${config.outboxDefaultTo})` : ""}`);
+  setInterval(() => {
+    if (!sock?.user) return;
+    outbox.check().catch((err) => audit.record("error", { where: "outbox", error: String(err) }));
+  }, 10_000);
+}
+
 async function connect(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(config.dataDir, "auth"));
   const { version } = await fetchLatestBaileysVersion();
@@ -254,6 +287,7 @@ async function connect(): Promise<void> {
       console.log(`Connected as ${sock.user?.id}. Listening for messages.`);
       audit.record("connected", { user: sock.user?.id });
       startScheduler();
+      startOutbox();
     }
     if (connection === "close") {
       const code = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
