@@ -43,6 +43,10 @@ export interface Config {
   skills: SkillsConfig;
   // Mark every incoming message as read (blue ticks), so the assistant's phone doesn't pile up unread chats.
   markAllRead: boolean;
+  // Folder other programs on this PC drop messages into (JSON files); they're posted at once. Empty turns it off.
+  outboxDir: string;
+  // Where an outbox message goes when its file has no "to": a group name or a staff name.
+  outboxDefaultTo: string;
   // Reports the assistant posts in a group at set times (Hong Kong time).
   schedules: Schedule[];
 }
@@ -65,6 +69,8 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   pmsUrl: "http://127.0.0.1:8765",
   skills: { dir: "", include: [] },
   markAllRead: true,
+  outboxDir: "",
+  outboxDefaultTo: "",
   schedules: [],
 };
 
@@ -78,6 +84,7 @@ export function loadConfig(file = "config.json"): Config {
   config.triggerWords = config.triggerWords.map((w) => w.toLowerCase().replace(/^@/, ""));
   config.dataDir = path.resolve(config.dataDir);
   config.logDir = path.resolve(config.logDir);
+  if (config.outboxDir) config.outboxDir = path.resolve(config.outboxDir);
   validateSchedules(config.schedules);
   if (config.driveRoots.length === 0) throw new Error("config.json: driveRoots is empty");
   return config;
