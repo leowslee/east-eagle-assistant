@@ -13,7 +13,7 @@ import makeWASocket, {
 } from "baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
-import { AI_UNAVAILABLE, Assistant } from "./agent.js";
+import { Assistant, isAiFailureReply } from "./agent.js";
 import { FileAuditLog } from "./audit.js";
 import { loadConfig } from "./config.js";
 import { Drive } from "./drive.js";
@@ -242,7 +242,7 @@ async function runTask(
       chatId, chatName, isGroup: Boolean(isJidGroup(chatId)), senderName: "Scheduled task", senderPhone: "", text: task.prompt,
       scheduled: { id: task.id, name: task.name, createdBy: task.createdBy },
     });
-    if (reply === AI_UNAVAILABLE) {
+    if (isAiFailureReply(reply)) {
       const retryAt = new Date(Date.now() + RETRY_MS);
       if (isDue(task, retryAt, undefined)) {
         tasks.unmarkRun(key);
