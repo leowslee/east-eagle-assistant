@@ -20,6 +20,24 @@ const MAX_TOOL_ROUNDS = 15;
 const MAX_CONVERSATION_CHARS = 400_000;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 export const AI_UNAVAILABLE = "Sorry, I couldn't reach the AI service just now. Please try again in a minute.";
+// Account problems that a retry won't fix, so the reply says what to do instead.
+const AI_NO_CREDIT = "Sorry, I can't answer right now: the firm's Anthropic API credit has run out. Leo needs to top it up at console.anthropic.com (Billing), then I'll work again straight away.";
+const AI_ACCOUNT_BLOCKED = "Sorry, I can't answer right now: the Anthropic API rejected my key or the account is disabled. Leo needs to check the API key and the organisation's status at console.anthropic.com.";
+const AI_FAILURE_REPLIES = new Set([AI_UNAVAILABLE, AI_NO_CREDIT, AI_ACCOUNT_BLOCKED]);
+
+/** True when a reply is one of the "AI service failed" messages (scheduled tasks retry on these). */
+export function isAiFailureReply(reply: string): boolean {
+  return AI_FAILURE_REPLIES.has(reply);
+}
+
+/** Picks the reply for an API error: a specific one for billing and key/account problems. */
+function aiFailureReply(err: unknown): string {
+  const status = (err as { status?: number })?.status;
+  const text = String(err);
+  if (/credit balance is too low|billing/i.test(text)) return AI_NO_CREDIT;
+  if (status === 401 || status === 403) return AI_ACCOUNT_BLOCKED;
+  return AI_UNAVAILABLE;
+}
 export const RESET_WORDS = new Set(["new", "/new", "reset", "/reset"]);
 
 export interface Incoming {
@@ -528,12 +546,13 @@ export class Assistant {
       console.error(`AI service error in "${msg.chatName}": ${String(err)}`);
       // The saved conversation was rejected (grown past the model's limit, or saved before the bot was
       // updated, which invalidates its thinking blocks): start fresh and try once more.
-      if (!retried && base > 0 && (err as { status?: number })?.status === 400) {
+      const failure = aiFailureReply(err);
+      if (!retried && base > 0 && failure === AI_UNAVAILABLE && (err as { status?: number })?.status === 400) {
         this.store.remove(msg.chatId);
         return this.handleNow(msg, true);
       }
       // Nothing from this turn is saved, so the stored conversation stays valid.
-      return this.reply(who, AI_UNAVAILABLE);
+      return this.reply(who, failure);
     }
 
     conversation.updated = Date.now();
