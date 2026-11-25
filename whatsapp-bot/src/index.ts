@@ -20,6 +20,7 @@ import { Drive } from "./drive.js";
 import { configKey, dueSchedules, hkParts, isDue, TaskStore, type Timing } from "./schedule.js";
 import { extractText, findStaff, groupAllowed, isAddressedToBot, stripAddress, userPart } from "./route.js";
 import { SmtpMailer } from "./email.js";
+import { alertMatches, alertText, ImapMailReader, MailStateFile } from "./mailbox.js";
 import { isApprovalRequest, OrderBook, parseOrderDecision } from "./inbox.js";
 import { Outbox } from "./outbox.js";
 import { Pms } from "./pms.js";
@@ -58,6 +59,13 @@ function mailer(): SmtpMailer | undefined {
   return new SmtpMailer(config.emailFrom, pass, config.assistantName);
 }
 
+// Reading the mailbox uses the same app password over IMAP (IMAP must be on in Gmail for this account).
+const mailReader = config.emailFrom && process.env.EMAIL_APP_PASSWORD ? new ImapMailReader(config.emailFrom, process.env.EMAIL_APP_PASSWORD) : undefined;
+if (mailReader) {
+  const who = config.emailReaders.map((p) => findStaff(config, p)?.name ?? p).join(", ") || "nobody";
+  console.log(`Email inbox: ${config.emailFrom} (read-only), for ${who}${config.emailAlerts.to ? `; new-mail alerts to ${config.emailAlerts.to}` : ""}`);
+}
+
 const skills = new Skills(config.skills);
 if (config.skills.dir) console.log(`Skills: ${skills.list.map((s) => s.name).join(", ") || "none found"} (from ${config.skills.dir})`);
 
@@ -76,7 +84,7 @@ const assistant = new Assistant(config, drive, new FileStore(path.join(config.da
     const match = Object.values(groups).find((g) => g.subject.trim().toLowerCase() === name.trim().toLowerCase());
     return match ? { id: match.id, name: match.subject } : undefined;
   },
-}, undefined, tasks, mailer(), config.pmsUrl ? new Pms(config.pmsUrl) : undefined, skills);
+}, undefined, tasks, mailer(), config.pmsUrl ? new Pms(config.pmsUrl) : undefined, skills, mailReader);
 
 async function groupName(jid: string): Promise<string> {
   const cached = groupNames.get(jid);
@@ -230,7 +238,7 @@ const retryAfter = new Map<string, number>();
 /** Runs a scheduled task. Returns false if it will be retried later. */
 async function runTask(
   key: string, chatId: string, chatName: string,
-  task: Timing & { name: string; prompt: string; createdBy: string; id: string },
+  task: Timing & { name: string; prompt: string; createdBy: string; createdByPhone?: string; id: string },
 ): Promise<boolean> {
   if (runningTasks.has(key) || (retryAfter.get(key) ?? 0) > Date.now()) return false;
   runningTasks.add(key);
@@ -240,7 +248,7 @@ async function runTask(
   try {
     const reply = await assistant.handle({
       chatId, chatName, isGroup: Boolean(isJidGroup(chatId)), senderName: "Scheduled task", senderPhone: "", text: task.prompt,
-      scheduled: { id: task.id, name: task.name, createdBy: task.createdBy },
+      scheduled: { id: task.id, name: task.name, createdBy: task.createdBy, createdByPhone: task.createdByPhone },
     });
     if (reply === AI_UNAVAILABLE) {
       const retryAt = new Date(Date.now() + RETRY_MS);
@@ -333,6 +341,43 @@ function startOutbox(): void {
   }, 10_000);
 }
 
+// New-mail alerts: the inbox is checked every few minutes while connected.
+let mailAlertsStarted = false;
+function startMailAlerts(): void {
+  const alert = config.emailAlerts;
+  if (mailAlertsStarted || !mailReader || !alert.to) return;
+  mailAlertsStarted = true;
+  const stateFile = new MailStateFile(path.join(config.dataDir, "mail-state.json"));
+  let checking = false;
+  const check = async () => {
+    if (checking || !sock?.user) return;
+    checking = true;
+    try {
+      const { state, messages } = await mailReader.newMail(stateFile.load());
+      const matching = messages.filter((m) => alertMatches(alert, m));
+      if (matching.length) {
+        const person = config.staff.find((s) => s.name.trim().toLowerCase() === alert.to.trim().toLowerCase());
+        const chatId = person ? `${person.phone}@s.whatsapp.net` : (await groupIdsByName()).get(alert.to.trim().toLowerCase());
+        if (!chatId) {
+          console.warn(`Email alerts: no staff member or group called "${alert.to}".`);
+          audit.record("email_alert_skipped", { to: alert.to, reason: "not found", count: matching.length });
+        } else {
+          await sock.sendMessage(chatId, { text: alertText(mailReader.address, matching) });
+          audit.record("email_alert", { to: alert.to, emails: matching.map((m) => ({ uid: m.uid, from: m.from, subject: m.subject })) });
+        }
+      }
+      stateFile.save(state); // saved after sending, so a failed send is tried again next time
+    } catch (err) {
+      audit.record("error", { where: "email_alerts", error: String(err) });
+    } finally {
+      checking = false;
+    }
+  };
+  console.log(`Email alerts: checking ${mailReader.address} every ${alert.everyMinutes} min, telling ${alert.to}.`);
+  check();
+  setInterval(check, alert.everyMinutes * 60_000);
+}
+
 async function connect(): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(path.join(config.dataDir, "auth"));
   const { version } = await fetchLatestBaileysVersion();
@@ -350,6 +395,7 @@ async function connect(): Promise<void> {
       audit.record("connected", { user: sock.user?.id });
       startScheduler();
       startOutbox();
+      startMailAlerts();
     }
     if (connection === "close") {
       const code = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;

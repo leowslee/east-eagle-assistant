@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { validateSchedules, type Schedule } from "./schedule.js";
 import type { SkillsConfig } from "./skills.js";
+import type { EmailAlertConfig } from "./mailbox.js";
 
 export interface DriveRoot {
   name: string; // what staff and Claude call it, e.g. "X drive"
@@ -33,6 +34,14 @@ export interface Config {
   webSearch: boolean;
   // The assistant's mailbox. Sending needs EMAIL_APP_PASSWORD in .env and an approver's YES for every email.
   emailFrom: string;
+  // Phone numbers allowed to ask about the assistant's inbox (search, read, attachments). Empty means the approvers.
+  // Everyone in the chat sees the answer, so asking in a group shares the email with the group.
+  emailReaders: string[];
+  // Folder on the drive where email attachments are saved when asked (e.g. Apex NAV packs). Empty means
+  // saving is off; reading attachments and sending them into the chat still work.
+  emailAttachmentsFolder: string;
+  // Tell someone (or a group) when new email arrives. Needs EMAIL_APP_PASSWORD and IMAP on.
+  emailAlerts: EmailAlertConfig;
   // Folder for records (attendance logs, filled forms).
   recordsFolder: string;
   // When false, adding records and saving new filled forms inside recordsFolder doesn't need an approver's YES.
@@ -69,6 +78,9 @@ const DEFAULTS: Omit<Config, "staff" | "approvers"> = {
   conversationIdleHours: 4,
   webSearch: true,
   emailFrom: "",
+  emailReaders: [],
+  emailAttachmentsFolder: "",
+  emailAlerts: { to: "", from: [], subjectContains: [], everyMinutes: 5 },
   recordsFolder: "",
   recordsNeedApproval: true,
   pmsUrl: "http://127.0.0.1:8765",
@@ -89,6 +101,9 @@ export function loadConfig(file = "config.json"): Config {
   config.staff = config.staff.map((s) => ({ name: s.name, phone: digitsOnly(s.phone) }));
   config.approvers = config.approvers.map(digitsOnly);
   config.orderApprovers = config.orderApprovers.length ? config.orderApprovers.map(digitsOnly) : config.approvers;
+  config.emailReaders = config.emailReaders.length ? config.emailReaders.map(digitsOnly) : config.approvers;
+  config.emailAlerts = { ...DEFAULTS.emailAlerts, ...config.emailAlerts };
+  config.emailAlerts.everyMinutes = Math.max(1, Number(config.emailAlerts.everyMinutes) || 5);
   config.triggerWords = config.triggerWords.map((w) => w.toLowerCase().replace(/^@/, ""));
   config.dataDir = path.resolve(config.dataDir);
   config.logDir = path.resolve(config.logDir);

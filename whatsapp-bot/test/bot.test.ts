@@ -41,6 +41,9 @@ function config(root: string): Config {
     conversationIdleHours: 4,
     webSearch: true,
     emailFrom: "eileen@example.com",
+    emailReaders: ["85290000001"],
+    emailAttachmentsFolder: path.join(root, "Trading", "Email"),
+    emailAlerts: { to: "", from: [], subjectContains: [], everyMinutes: 5 },
     recordsFolder: path.join(root, "Records"),
     recordsNeedApproval: true,
     pmsUrl: "",
@@ -654,4 +657,153 @@ test("outbox also posts to extra chats, without repeating them on a retry", asyn
   await outbox.check();
   assert.deepEqual(sent, ["1@s.whatsapp.net", "2@g.us"]);
   assert.ok(fs.existsSync(path.join(dir, "sent", "a.json")));
+});
+
+// Fake mailbox for the email-reading tools.
+function fakeMail() {
+  const calls: any[] = [];
+  const mail = {
+    address: "eileen@example.com",
+    async search(s: any) {
+      calls.push(["search", s]);
+      return [{ uid: 42, folder: "inbox", date: "2026-11-20T02:00:00.000Z", from: "Apex <nav@apexgroup.com>", to: "eileen@example.com", subject: "CDF NAV pack Oct 2026", unread: true, attachments: ["NAV pack.csv"] }];
+    },
+    async read(uid: number) {
+      calls.push(["read", uid]);
+      return { uid, folder: "inbox", date: "", from: "Apex", to: "", cc: "", subject: "CDF NAV pack Oct 2026", unread: true, text: "Please find attached.", totalChars: 21, attachments: [{ index: 0, name: "NAV pack.csv", type: "text/csv", size: 20 }] };
+    },
+    async attachment(uid: number, index: number) {
+      calls.push(["attachment", uid, index]);
+      return { name: "NAV pack.csv", type: "text/csv", data: Buffer.from("Class,NAV\nA,123.45\n") };
+    },
+    async newMail() {
+      return { state: {}, messages: [] };
+    },
+  };
+  return { mail: mail as any, calls };
+}
+
+test("agent: inbox tools are only offered when the mailbox is set up", async () => {
+  const { root } = tempDrive();
+  const run = async (withMail: boolean) => {
+    const { client, requests } = fakeClaude([{ content: [{ type: "text", text: "Hi" }], stop_reason: "end_turn" }]);
+    const tools: string[] = [];
+    client.beta.messages.create = ((orig) => async (p: any) => { tools.push(...p.tools.map((t: any) => t.name)); return orig(p); })(client.beta.messages.create);
+    const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), fakeMessenger().messenger, client,
+      undefined, undefined, undefined, undefined, withMail ? fakeMail().mail : undefined);
+    await a.handle(incoming("hi"));
+    void requests;
+    return tools;
+  };
+  assert.ok(!(await run(false)).includes("search_email"));
+  assert.ok((await run(true)).includes("read_email"));
+});
+
+test("agent: Leo can search and read the inbox and its attachments; others are refused", async () => {
+  const { root } = tempDrive();
+  const script = () => fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "search_email", input: { query: "from:apexgroup.com has:attachment" } }], stop_reason: "tool_use" },
+    { content: [{ type: "tool_use", id: "t2", name: "read_email", input: { uid: 42 } }], stop_reason: "tool_use" },
+    { content: [{ type: "tool_use", id: "t3", name: "email_attachment", input: { uid: 42, attachment: 0, action: "read" } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "NAV A is 123.45." }], stop_reason: "end_turn" },
+  ]);
+  const leoScript = script();
+  const { mail, calls } = fakeMail();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), fakeMessenger().messenger, leoScript.client,
+    undefined, undefined, undefined, undefined, mail);
+  await a.handle({ ...incoming("check Apex email", "Leo", "85290000001"), chatId: "leo@s.whatsapp.net", isGroup: false });
+  const results = leoScript.requests.slice(1).map((r: any) => r.at(-1).content[0]);
+  assert.match(results[0].content, /CDF NAV pack Oct 2026/);
+  assert.equal(calls[0][1].query, "from:apexgroup.com has:attachment");
+  assert.match(results[1].content, /Please find attached/);
+  assert.match(results[2].content, /A,123\.45/);
+
+  const amyScript = script();
+  const amyMail = fakeMail();
+  const audit = new MemoryAuditLog();
+  const b = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), audit, fakeMessenger().messenger, amyScript.client,
+    undefined, undefined, undefined, undefined, amyMail.mail);
+  await b.handle(incoming("check Apex email"));
+  const refused = amyScript.requests[1].at(-1).content[0];
+  assert.equal(refused.is_error, true);
+  assert.match(refused.content, /only Leo may ask about the mailbox/);
+  assert.equal(amyMail.calls.length, 0);
+  assert.ok(audit.entries.some((e) => e.event === "email_refused"));
+});
+
+test("agent: scheduled tasks read the inbox only if set up by an inbox reader", async () => {
+  const { root } = tempDrive();
+  const run = async (scheduled: any) => {
+    const { client, requests } = fakeClaude([
+      { content: [{ type: "tool_use", id: "t1", name: "search_email", input: {} }], stop_reason: "tool_use" },
+      { content: [{ type: "text", text: "Done." }], stop_reason: "end_turn" },
+    ]);
+    const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), fakeMessenger().messenger, client,
+      undefined, undefined, undefined, undefined, fakeMail().mail);
+    await a.handle({ ...incoming("Check new Apex email", "Scheduled task", ""), scheduled });
+    return requests[1].at(-1).content[0];
+  };
+  assert.ok(!(await run({ id: "T1", name: "Apex", createdBy: "Leo", createdByPhone: "85290000001" })).is_error);
+  assert.ok(!(await run({ id: "config", name: "Apex", createdBy: "config.json" })).is_error);
+  assert.equal((await run({ id: "T2", name: "Apex", createdBy: "Amy", createdByPhone: "85290000002" })).is_error, true);
+});
+
+test("agent: email attachments go into the chat, or are saved without replacing files", async () => {
+  const { root } = tempDrive();
+  fs.mkdirSync(path.join(root, "Trading", "Email"));
+  const { client } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "email_attachment", input: { uid: 42, attachment: 0, action: "send_to_chat" } }], stop_reason: "tool_use" },
+    { content: [{ type: "tool_use", id: "t2", name: "email_attachment", input: { uid: 42, attachment: 0, action: "save" } }], stop_reason: "tool_use" },
+    { content: [{ type: "tool_use", id: "t3", name: "email_attachment", input: { uid: 42, attachment: 0, action: "save" } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Saved." }], stop_reason: "end_turn" },
+  ]);
+  const { sent, messenger } = fakeMessenger();
+  const a = new Assistant(config(root), new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client,
+    undefined, undefined, undefined, undefined, fakeMail().mail);
+  await a.handle({ ...incoming("save the NAV pack", "Leo", "85290000001"), chatId: "leo@s.whatsapp.net", isGroup: false });
+  assert.match(sent[0].file!, /NAV pack\.csv$/);
+  assert.ok(!fs.existsSync(sent[0].file!)); // the temporary copy is removed after sending
+  assert.deepEqual(fs.readdirSync(path.join(root, "Trading", "Email")).sort(), ["NAV pack (2).csv", "NAV pack.csv"]);
+  assert.equal(fs.readFileSync(path.join(root, "Trading", "Email", "NAV pack.csv"), "utf8"), "Class,NAV\nA,123.45\n");
+});
+
+test("agent: an inbox reader who isn't an approver needs YES to save an attachment", async () => {
+  const { root } = tempDrive();
+  fs.mkdirSync(path.join(root, "Trading", "Email"));
+  const cfg = { ...config(root), emailReaders: ["85290000001", "85290000002"] };
+  const { client } = fakeClaude([
+    { content: [{ type: "tool_use", id: "t1", name: "email_attachment", input: { uid: 42, attachment: 0, action: "save" } }], stop_reason: "tool_use" },
+    { content: [{ type: "text", text: "Waiting for Leo." }], stop_reason: "end_turn" },
+  ]);
+  const { sent, messenger } = fakeMessenger();
+  const a = new Assistant(cfg, new Drive([{ name: "X drive", path: root }]), new MemoryStore(), new MemoryAuditLog(), messenger, client,
+    undefined, undefined, undefined, undefined, fakeMail().mail);
+  await a.handle(incoming("save the NAV pack"));
+  assert.equal(fs.readdirSync(path.join(root, "Trading", "Email")).length, 0);
+  const request = sent.find((s) => s.chatId === "85290000001@s.whatsapp.net")!;
+  assert.match(request.text!, /Save email attachment "NAV pack.csv"/);
+  const code = request.text!.match(/YES (\d{4})/)![1];
+  assert.match((await a.handleApproval("85290000001", "Leo", `YES ${code}`))!, /Saved the attachment/);
+  assert.deepEqual(fs.readdirSync(path.join(root, "Trading", "Email")), ["NAV pack.csv"]);
+});
+
+test("mailbox: attachment names, safe file names, and alert filters", async () => {
+  const { alertMatches, alertText, attachmentNames, safeFileName } = await import("../src/mailbox.js");
+  const structure = {
+    type: "multipart/mixed",
+    childNodes: [
+      { type: "multipart/alternative", childNodes: [{ type: "text/plain" }, { type: "text/html" }] },
+      { type: "application/pdf", disposition: "attachment", dispositionParameters: { filename: "NAV pack Oct.pdf" } },
+      { type: "application/vnd.ms-excel", parameters: { name: "Holdings.xlsx" } },
+    ],
+  };
+  assert.deepEqual(attachmentNames(structure), ["NAV pack Oct.pdf", "Holdings.xlsx"]);
+  assert.equal(safeFileName("..\\..\\evil:name?.pdf"), "evil_name_.pdf");
+  assert.equal(safeFileName(".."), "attachment");
+  const m = { uid: 1, folder: "inbox" as const, date: "", from: "Apex <nav@apexgroup.com>", to: "", subject: "CDF NAV Pack", unread: true, attachments: ["a.pdf"] };
+  const alert = { to: "Leo", from: ["apexgroup.com"], subjectContains: ["nav"], everyMinutes: 5 };
+  assert.ok(alertMatches(alert, m));
+  assert.ok(!alertMatches(alert, { ...m, from: "spam@x.com" }));
+  assert.ok(alertMatches({ ...alert, from: [], subjectContains: [] }, { ...m, from: "anyone@x.com" }));
+  assert.match(alertText("eileen@example.com", [m]), /CDF NAV Pack[\s\S]*Attachments: a\.pdf/);
 });
