@@ -16,7 +16,9 @@
     "@anthropic-ai/sdk": "1.6.0",
     "baileys": "7.0.0-rc14",
     "exceljs": "4.4.0",
+    "imapflow": "2.11.0",
     "jszip": "3.10.2",
+    "mailparser": "3.14.2",
     "mammoth": "1.13.0",
     "nodemailer": "10.2.1",
     "pdf-parse": "2.4.5",
@@ -25,6 +27,7 @@
     "tsx": "4.23.15"
   },
   "devDependencies": {
+    "@types/mailparser": "3.9.0",
     "@types/node": "22.20.5",
     "@types/nodemailer": "8.0.2",
     "@types/qrcode-terminal": "0.12.2",

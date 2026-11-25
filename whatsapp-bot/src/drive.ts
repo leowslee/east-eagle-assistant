@@ -203,6 +203,25 @@ export class Drive {
     return full;
   }
 
+  /** Saves a new file (e.g. an email attachment) inside a folder, adding " (2)" etc. rather than replacing anything. */
+  async saveNewFile(folder: string, name: string, data: Buffer): Promise<string> {
+    const dir = await this.resolve(folder);
+    if (!(await fs.stat(dir)).isDirectory()) throw new DriveError(`Not a folder: ${folder}`);
+    if (data.length > MAX_FILE_BYTES) throw new DriveError("File is too large to save (over 50 MB).");
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let n = 1; n < 100; n++) {
+      const full = await this.resolveForWrite(path.join(dir, n === 1 ? name : `${stem} (${n})${ext}`));
+      try {
+        await fs.writeFile(full, data, { flag: "wx" });
+        return full;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+    }
+    throw new DriveError(`Too many files called ${name} in ${dir}.`);
+  }
+
   async copyFile(from: string, to: string): Promise<string> {
     const src = await this.resolve(from);
     const dest = await this.resolveForWrite(to);
